@@ -17,12 +17,12 @@ import uuid # For generating unique IDs for approved hadiths
 from datetime import datetime # For submission timestamp
 
 # --- Configuration ---
-BOT_TOKEN = "7378891608:AAFUPueUuSAPHd4BPN8znb-jcDGsjnnm_f8"  # Token المستخدم
+BOT_TOKEN = "7448719208:AAH5jFHRNm2ZR-GZch-6SnxGFxIFuZsAldM"  # Token المستخدم
 JSON_FILE = '1.json'     # اسم ملف الأحاديث JSON
 DB_NAME = 'hadith_bot.db'      # اسم ملف قاعدة البيانات SQLite
 DEVELOPER_NAME = "عبد المجيد" # اسم المطور
 MAX_MESSAGE_LENGTH = 4000      # الحد الأقصى لطول رسالة تليجرام
-SNIPPET_CONTEXT_WORDS = 5      # Number of words before/after keyword in snippet
+SNIPPET_CONTEXT_WORDS = 8      # Number of words before/after keyword in snippet
 BOT_OWNER_ID = 6504095190       # !!! معرف المستخدم الخاص بالمالك !!! (تم وضع معرفك كمثال)
 
 # --- Redis Configuration ---
