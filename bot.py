@@ -24,12 +24,13 @@ SNIPPET_CONTEXT_WORDS = 5      # Number of words before/after keyword in snippet
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_DB = 0
-CACHE_EXPIRY_SECONDS = 55555555555555    # مدة صلاحية الكاش (مثال: ساعة واحدة)
+CACHE_EXPIRY_SECONDS = 5555555555555555    # مدة صلاحية الكاش (مثال: ساعة واحدة)
 
 # --- Logging Setup ---
+# --- MODIFIED: Set level to DEBUG to see detailed logs ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG # Changed to DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -71,11 +72,10 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        # Ensure stats table exists and add start_usage key
         cursor.execute("CREATE TABLE IF NOT EXISTS stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
         cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", ('search_count', 0))
         cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", ('user_count', 0))
-        cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", ('start_usage', 0)) # Add new stat
+        cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", ('start_usage', 0))
         cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
         cursor.execute('''
             CREATE VIRTUAL TABLE IF NOT EXISTS hadiths_fts USING fts5(
@@ -177,7 +177,6 @@ def log_user(user_id: int):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-        # Update user count stat based on the actual count in the users table
         cursor.execute("SELECT COUNT(*) FROM users")
         user_count = cursor.fetchone()[0]
         cursor.execute("UPDATE stats SET value = ? WHERE key = ?", (user_count, 'user_count'))
@@ -234,10 +233,8 @@ def split_message(text: str) -> List[str]:
 def search_hadiths_db(query: str) -> List[int]:
     """
     Searches for hadiths using FTS, handles prefixes, and deduplicates results
-    based on original_id. Checks Redis cache first.
-    Returns a list of unique FTS rowids of matching hadiths.
+    based on original_id. Checks Redis cache first. Returns a list of unique FTS rowids.
     """
-    # Unchanged
     if not query: return []
 
     normalized_query = query.strip().lower()
@@ -245,18 +242,31 @@ def search_hadiths_db(query: str) -> List[int]:
     redis_conn = get_redis_connection()
     cached_result = None
 
+    # 1. Check Redis Cache
     if redis_conn:
         try:
             cached_data = redis_conn.get(cache_key)
             if cached_data:
                 cached_result = json.loads(cached_data.decode('utf-8'))
-                logger.info(f"Cache HIT for unique query '{query}'. Found {len(cached_result)} results in Redis.")
-                return cached_result
-        except json.JSONDecodeError: logger.error(f"Error decoding cached JSON for key '{cache_key}'. Ignoring cache.")
-        except redis.exceptions.RedisError as e: logger.error(f"Redis error when getting cache for key '{cache_key}': {e}")
-        except Exception as e: logger.error(f"Unexpected error during Redis cache get: {e}")
+                # Check if cached result is indeed a list (basic validation)
+                if isinstance(cached_result, list):
+                    logger.info(f"Cache HIT for unique query '{query}'. Found {len(cached_result)} results in Redis.")
+                    return cached_result
+                else:
+                    logger.warning(f"Invalid data type found in cache for key '{cache_key}'. Expected list, got {type(cached_result)}. Ignoring cache.")
+                    redis_conn.delete(cache_key) # Delete invalid cache entry
+            else:
+                logger.info(f"Cache MISS for unique query '{query}'.")
+        except json.JSONDecodeError:
+            logger.error(f"Error decoding cached JSON for key '{cache_key}'. Ignoring cache.")
+            if redis_conn: redis_conn.delete(cache_key) # Delete invalid cache entry
+        except redis.exceptions.RedisError as e:
+            logger.error(f"Redis error when getting cache for key '{cache_key}': {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error during Redis cache get: {e}")
 
-    logger.info(f"Cache MISS for unique query '{query}'. Searching SQLite FTS with prefix handling and deduplication.")
+    logger.info(f"Searching SQLite FTS for query '{query}' with prefix handling and deduplication.")
+    # 2. Search SQLite FTS
     conn = get_db_connection()
     cursor = conn.cursor()
     unique_rowids = []
@@ -270,6 +280,7 @@ def search_hadiths_db(query: str) -> List[int]:
         fts_match_query = " OR ".join(fts_query_parts)
 
         logger.debug(f"Constructed FTS MATCH query: {fts_match_query}")
+        # Select rowid and original_id to allow deduplication
         cursor.execute(
             "SELECT rowid, original_id FROM hadiths_fts WHERE hadiths_fts MATCH ? ORDER BY rank",
             (fts_match_query,)
@@ -277,26 +288,48 @@ def search_hadiths_db(query: str) -> List[int]:
         results = cursor.fetchall()
         logger.info(f"Raw FTS Search for '{query}' found {len(results)} potential matches.")
 
+        # --- MODIFIED: Added detailed logging for deduplication ---
+        logger.debug(f"Starting deduplication for query '{query}'.")
         for row in results:
+            rowid = row['rowid'] # Get rowid
             original_id = row['original_id']
-            if original_id not in seen_original_ids:
-                seen_original_ids.add(original_id)
-                unique_rowids.append(row['rowid'])
+            # Log with type info for debugging potential ID issues
+            logger.debug(f"  Processing rowid: {rowid}, original_id: '{original_id}' (type: {type(original_id)})")
+            if original_id is None:
+                logger.warning(f"  Skipping rowid {rowid} due to None original_id.")
+                continue # Skip if original_id is None
 
-        logger.info(f"Deduplicated search for '{query}' resulted in {len(unique_rowids)} unique hadiths.")
+            # Ensure original_id is treated as string for set comparison
+            original_id_str = str(original_id)
 
+            if original_id_str not in seen_original_ids: # Check if ID already seen
+                logger.debug(f"    -> Adding rowid {rowid} (new original_id: '{original_id_str}')")
+                seen_original_ids.add(original_id_str)  # Add new ID to set
+                unique_rowids.append(rowid) # Add corresponding rowid to results
+            else:
+                logger.debug(f"    -> Skipping rowid {rowid} (duplicate original_id: '{original_id_str}')")
+        logger.debug(f"Finished deduplication. Seen IDs count: {len(seen_original_ids)}. Unique rowids: {len(unique_rowids)}")
+        # --- End modification ---
+
+        # 3. Cache the deduplicated result in Redis
         if unique_rowids and redis_conn:
             try:
+                # Ensure we cache the final list of unique rowids
                 serialized_results = json.dumps(unique_rowids)
                 redis_conn.set(cache_key, serialized_results, ex=CACHE_EXPIRY_SECONDS)
                 logger.info(f"Cached {len(unique_rowids)} unique results for query '{query}' in Redis.")
-            except redis.exceptions.RedisError as e: logger.error(f"Redis error when setting cache for key '{cache_key}': {e}")
-            except Exception as e: logger.error(f"Unexpected error during Redis cache set: {e}")
+            except redis.exceptions.RedisError as e:
+                logger.error(f"Redis error when setting cache for key '{cache_key}': {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error during Redis cache set: {e}")
 
     except sqlite3.Error as e:
-        if "malformed MATCH expression" in str(e): logger.warning(f"FTS query syntax error for query '{query}' (constructed: {fts_match_query}): {e}")
-        else: logger.error(f"Database FTS search error for query '{query}': {e}")
-    finally: conn.close()
+        if "malformed MATCH expression" in str(e):
+            logger.warning(f"FTS query syntax error for query '{query}' (constructed: {fts_match_query}): {e}")
+        else:
+            logger.error(f"Database FTS search error for query '{query}': {e}")
+    finally:
+        conn.close()
     return unique_rowids
 
 
@@ -320,21 +353,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user(user.id) # Log user visit
     update_stats('start_usage') # Update start command usage stat
 
-    # --- MODIFIED: Added channel button ---
     keyboard = [
         [InlineKeyboardButton(
             "➕ أضفني إلى مجموعتك",
             url=f"https://t.me/{context.bot.username}?startgroup=true"
         )],
         [InlineKeyboardButton(
-            "📢 قناة البوت", # Button text including username
+            "📢 قناة البوت ", # Button text including username
             url="https://t.me/shia_b0t" # Channel URL
         )]
     ]
 
     user_name = html.escape(user.first_name)
 
-    # --- MODIFIED: Removed channel info and prayer from text ---
     welcome_message = f"""
     <b>مرحبا {user_name}!
     أنا بوت كاشف أحاديث الشيعة في قاعدة بياناتي اكثر من 26155 حديث 🔍</b>
@@ -367,11 +398,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     <code>شيعة باهتوهم</code>
 
     ادعو لوالدي بالرحمة بارك الله فيكم ان استفدتم من هذا العمل
-    """ # Prayer request kept at the end of the text
+    """
 
     await update.message.reply_html(
         welcome_message,
-        reply_markup=InlineKeyboardMarkup(keyboard) # Pass the updated keyboard
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -383,30 +414,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_count = get_stat('user_count')
     start_usage_count = get_stat('start_usage')
 
-    # --- MODIFIED: Removed the problematic comment line ---
     help_text = f"""
     <b>مساعدة وإحصائيات بوت الأحاديث</b> 🕌
 
     📊 <b>الإحصائيات:</b>
-    - عدد الأحاديث في قاعدة البيانات: {total_hadiths}
+    - عدد الأحاديث المطابقة في قاعدة البيانات: {total_hadiths}
     - إجمالي عمليات البحث: {search_count}
     - عدد المستخدمين : {user_count}
-    
 
     🔍 <b>كيفية البحث:</b>
     أرسل رسالة تبدأ بـ <code>شيعة</code> أو <code>شيعه</code> ثم مسافة ثم الكلمة أو الجملة التي تريد البحث عنها.
-    مثال: <code>شيعة باهتوهم </code>
-  
-    """ # Removed the developer line and the invalid comment
+    مثال: <code>شيعه  باهتوهم</code>
 
-    # --- MODIFIED: Added developer button ---
+    """
+
     developer_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(" المطور: عبد المجيد", url="https://t.me/j_dd_j")]
     ])
 
     await update.message.reply_html(
         help_text,
-        reply_markup=developer_keyboard, # Add the developer button
+        reply_markup=developer_keyboard,
         disable_web_page_preview=True
     )
 
@@ -581,7 +609,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if buttons:
             if len(response_text) > MAX_MESSAGE_LENGTH:
-                 await update.message.reply_text(f"⚠️ تم العثور على {num_results} نتيجة فريدة، لكن قائمة المقتطفات طويلة جدًا.")
+                 await update.message.reply_text(f"⚠️ تم العثور على {num_results} نتيجة مطابقة، لكن قائمة المقتطفات طويلة جدًا.")
             else:
                  await update.message.reply_html(response_text)
 
@@ -763,7 +791,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as send_err: logger.error(f"Failed to send error message to user after ValueError: {send_err}")
     except telegram.error.TelegramError as e:
         logger.error(f"Telegram API error in handle_button_click for data {data}: {e}")
-        try: await query.message.reply_text(f"⚠️ حدث خطأ  : {e.message}")
+        try: await query.message.reply_text(f"⚠️ حدث خطأ في تليجرام: {e.message}")
         except Exception as send_err: logger.error(f"Failed to send Telegram error message to user: {send_err}")
     except Exception as e:
         logger.exception(f"An unexpected error occurred in handle_button_click for data {data}: {e}")
