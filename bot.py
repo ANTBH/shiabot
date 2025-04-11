@@ -591,7 +591,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Sent part 1 (single search result, manually constructed) for rowid {row_id}, message_id {message_sent.message_id}")
             if total_parts_count > 1:
                 context.user_data[f'remaining_parts_{message_sent.message_id}'] = remaining_parts; context.user_data[f'total_parts_{message_sent.message_id}'] = total_parts_count
-                callback_data_more = f"more_{message_sent.message_id}_2"; keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد 👇", callback_data=callback_data_more)]]) # Fixed: Use _2
+                callback_data_more = f"more_{message_sent.message_id}_2"; keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد ", callback_data=callback_data_more)]]) # Fixed: Use _2
                 try: await context.bot.edit_message_reply_markup(chat_id=update.message.chat_id, message_id=message_sent.message_id, reply_markup=keyboard); logger.info(f"Edited message {message_sent.message_id} to add 'More' button.")
                 except telegram.error.BadRequest as e: logger.warning(f"Could not edit message {message_sent.message_id} to add 'More' button: {e}")
                 except telegram.error.TelegramError as e: logger.error(f"Telegram error editing message {message_sent.message_id} to add 'More' button: {e}")
@@ -631,7 +631,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if buttons:
             if len(response_text) > MAX_MESSAGE_LENGTH: await update.message.reply_text(f"⚠️ تم العثور على {num_results} نتيجة مطابقة، لكن قائمة المقتطفات طويلة جدًا.")
             else: await update.message.reply_html(response_text)
-            keyboard = InlineKeyboardMarkup(buttons); await update.message.reply_text("👇 اضغط على زر الحديث لعرضه كاملاً:", reply_markup=keyboard)
+            keyboard = InlineKeyboardMarkup(buttons); await update.message.reply_text(" اضغط على زر الحديث لعرضه كاملاً:", reply_markup=keyboard)
         else: await update.message.reply_text("⚠️ حدث خطأ أثناء عرض النتائج.")
         return
 
@@ -672,7 +672,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                     # --- FIXED: Use _2 for the first 'More' button callback ---
                     callback_data_more = f"more_{message_sent.message_id}_2";
                     # --- END FIX ---
-                    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد 👇", callback_data=callback_data_more)]])
+                    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد ", callback_data=callback_data_more)]])
                     try: await context.bot.edit_message_reply_markup(chat_id=query.message.chat_id, message_id=message_sent.message_id, reply_markup=keyboard); logger.info(f"Edited message {message_sent.message_id} to add 'More' button.")
                     except telegram.error.BadRequest as e: logger.warning(f"Could not edit message {message_sent.message_id} to add 'More' button: {e}")
                     except telegram.error.TelegramError as e: logger.error(f"Telegram error editing message {message_sent.message_id} to add 'More' button: {e}")
@@ -717,7 +717,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                         next_overall_part_for_button = current_part_display_num + 1
                         callback_data_next = f"more_{new_message.message_id}_{next_overall_part_for_button}"
                         logger.debug(f"  Generating next callback data: {callback_data_next}") # Log next callback
-                        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد 👇", callback_data=callback_data_next)]])
+                        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد ", callback_data=callback_data_next)]])
                         try: await context.bot.edit_message_reply_markup(chat_id=query.message.chat_id, message_id=new_message.message_id, reply_markup=keyboard); logger.info(f"Added 'More' button to new message {new_message.message_id}")
                         except telegram.error.BadRequest as e: logger.warning(f"Could not add 'More' button to more result message {new_message.message_id}: {e}")
                         except telegram.error.TelegramError as e: logger.error(f"Telegram error adding 'More' button to new message {new_message.message_id}: {e}")
