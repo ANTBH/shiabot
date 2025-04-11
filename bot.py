@@ -24,7 +24,7 @@ SNIPPET_CONTEXT_WORDS = 5      # Number of words before/after keyword in snippet
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_DB = 0
-CACHE_EXPIRY_SECONDS = 3600    # مدة صلاحية الكاش (مثال: ساعة واحدة)
+CACHE_EXPIRY_SECONDS = 55555555555555    # مدة صلاحية الكاش (مثال: ساعة واحدة)
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -388,7 +388,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     <b>مساعدة وإحصائيات بوت الأحاديث</b> 🕌
 
     📊 <b>الإحصائيات:</b>
-    - عدد الأحاديث الفريدة في قاعدة البيانات: {total_hadiths}
+    - عدد الأحاديث في قاعدة البيانات: {total_hadiths}
     - إجمالي عمليات البحث: {search_count}
     - عدد المستخدمين : {user_count}
     
@@ -401,7 +401,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- MODIFIED: Added developer button ---
     developer_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✨ المطور: عبد المجيد", url="https://t.me/j_dd_j")]
+        [InlineKeyboardButton(" المطور: عبد المجيد", url="https://t.me/j_dd_j")]
     ])
 
     await update.message.reply_html(
@@ -522,7 +522,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle 2-10 results (Snippet logic unchanged)
     if 1 < num_results <= 10:
         logger.info(f"Found {num_results} unique results, displaying snippets.")
-        response_text = f"💡 تم العثور على <b>{num_results}</b> نتائج فريدة للبحث عن '<b>{safe_search_query}</b>':\n\n"
+        response_text = f"💡 تم العثور على <b>{num_results}</b> نتائج مطابقة للبحث عن '<b>{safe_search_query}</b>':\n\n"
         buttons = []
         for row_id in matching_rowids:
             hadith_details = get_hadith_details_by_db_id(row_id)
@@ -593,7 +593,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle > 10 results (Unchanged)
     if num_results > 10:
-        await update.message.reply_text(f"⚠️ تم العثور على {num_results} نتيجة فريدة لكلمة البحث '<b>{safe_search_query}</b>'. النتائج كثيرة جدًا لعرض المقتطفات. يرجى تحديد بحثك أكثر.", parse_mode='HTML')
+        await update.message.reply_text(f"⚠️ تم العثور على {num_results} نتيجة مطابقة لكلمة البحث '<b>{safe_search_query}</b>'. النتائج كثيرة جدًا لعرض المقتطفات. يرجى تحديد بحثك أكثر.", parse_mode='HTML')
         return
 
 # --- Callback Query Handler ---
@@ -763,7 +763,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as send_err: logger.error(f"Failed to send error message to user after ValueError: {send_err}")
     except telegram.error.TelegramError as e:
         logger.error(f"Telegram API error in handle_button_click for data {data}: {e}")
-        try: await query.message.reply_text(f"⚠️ حدث خطأ في تليجرام: {e.message}")
+        try: await query.message.reply_text(f"⚠️ حدث خطأ  : {e.message}")
         except Exception as send_err: logger.error(f"Failed to send Telegram error message to user: {send_err}")
     except Exception as e:
         logger.exception(f"An unexpected error occurred in handle_button_click for data {data}: {e}")
