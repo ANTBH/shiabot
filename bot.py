@@ -15,9 +15,10 @@ import asyncio # Import asyncio for potential sleep
 BOT_TOKEN = "7378891608:AAFUPueUuSAPHd4BPN8znb-jcDGsjnnm_f8"  # استبدل هذا بالتوكن الخاص ببوتك
 JSON_FILE = '1.json'     # اسم ملف الأحاديث JSON (للقراءة الأولية فقط)
 DB_NAME = 'hadith_bot.db'      # اسم ملف قاعدة البيانات SQLite
-DEVELOPER_NAME = "عبدالمجيد " # استبدل هذا باسم المطور
+DEVELOPER_NAME = "عبد المجيد" # اسم المطور (لم يعد يستخدم في النص ولكن يمكن الاحتفاظ به)
 MAX_MESSAGE_LENGTH = 4000      # الحد الأقصى لطول رسالة تليجرام
-SNIPPET_CONTEXT_WORDS = 5  
+SNIPPET_CONTEXT_WORDS = 5      # Number of words before/after keyword in snippet
+# MIN_FIRST_PART_CONTENT_LEN = 50 # No longer needed with manual construction
 
 # --- Redis Configuration ---
 REDIS_HOST = 'localhost'
@@ -70,9 +71,11 @@ def init_db():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        # Ensure stats table exists and add start_usage key
         cursor.execute("CREATE TABLE IF NOT EXISTS stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
         cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", ('search_count', 0))
         cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", ('user_count', 0))
+        cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", ('start_usage', 0)) # Add new stat
         cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
         cursor.execute('''
             CREATE VIRTUAL TABLE IF NOT EXISTS hadiths_fts USING fts5(
@@ -174,6 +177,7 @@ def log_user(user_id: int):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+        # Update user count stat based on the actual count in the users table
         cursor.execute("SELECT COUNT(*) FROM users")
         user_count = cursor.fetchone()[0]
         cursor.execute("UPDATE stats SET value = ? WHERE key = ?", (user_count, 'user_count'))
@@ -212,6 +216,7 @@ def arabic_number_to_word(n: int) -> str:
 def split_message(text: str) -> List[str]:
     """Splits a long message into parts respecting MAX_MESSAGE_LENGTH.
        NOTE: This is now used primarily for splitting the *remaining* text after the first part."""
+    # Unchanged
     parts = []
     if not text: # Handle empty input
         return []
@@ -219,13 +224,11 @@ def split_message(text: str) -> List[str]:
         split_pos = text.rfind('\n', 0, MAX_MESSAGE_LENGTH)
         if split_pos == -1:
             split_pos = text.rfind(' ', 0, MAX_MESSAGE_LENGTH)
-        # If no newline or space is found, force split at MAX_MESSAGE_LENGTH
-        # This prevents infinite loops on very long strings without breaks.
-        if split_pos == -1 or split_pos == 0: # Added split_pos == 0 check
+        if split_pos == -1 or split_pos == 0:
             split_pos = MAX_MESSAGE_LENGTH
         parts.append(text[:split_pos])
         text = text[split_pos:].lstrip()
-    parts.append(text) # Add the last remaining part
+    parts.append(text)
     return parts
 
 def search_hadiths_db(query: str) -> List[int]:
@@ -310,47 +313,102 @@ def get_hadith_details_by_db_id(row_id: int) -> Optional[sqlite3.Row]:
     return hadith_details
 
 # --- Bot Command Handlers (start, help_command) ---
-# Unchanged
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Unchanged
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /start command with a detailed welcome message and buttons."""
     user = update.effective_user
-    log_user(user.id)
-    bot_username = context.bot.username
-    add_group_url = f"https://t.me/{bot_username}?startgroup=true"
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➕ أضف البوت إلى مجموعتك", url=add_group_url)]])
+    log_user(user.id) # Log user visit
+    update_stats('start_usage') # Update start command usage stat
+
+    # --- MODIFIED: Added channel button ---
+    keyboard = [
+        [InlineKeyboardButton(
+            "➕ أضفني إلى مجموعتك",
+            url=f"https://t.me/{context.bot.username}?startgroup=true"
+        )],
+        [InlineKeyboardButton(
+            "📢 قناة البوت", # Button text including username
+            url="https://t.me/shia_b0t" # Channel URL
+        )]
+    ]
+
+    user_name = html.escape(user.first_name)
+
+    # --- MODIFIED: Removed channel info and prayer from text ---
     welcome_message = f"""
-    🕌 أهلاً بك يا {user.mention_html()} في بوت الأحاديث!
+    <b>مرحبا {user_name}!
+    أنا بوت كاشف أحاديث الشيعة في قاعدة بياناتي اكثر من 26155 حديث 🔍</b>
 
-    للبحث، أرسل رسالة تبدأ بـ `شيعة` أو `شيعه` متبوعة بكلمة البحث.
-    مثال: `شيعة الحسين`
+    <i>مميزات البوت:</i>
+    - كتاب الكافي للكليني مع التصحيح من مراة العقول للمجلسي
+    - جميع الاحاديث الموجودة في عيون اخبار الرضا للصدوق
+    - كتاب نهج البلاغة
+    - كتاب الخصال للصدوق
+    - وسيتم اضافة باقي كتب الشيعة
+    - كتاب الامالي للصدوق
+    - كتاب الامالي للمفيد
+    - كتاب التوحيد للصدوق
+    - كتاب فضائل الشيعة للصدوق
+    - كتاب كامل الزيارات لابن قولويه القمي
+    - كتاب الضعفاء لابن الغضائري
+    - كتاب الغيبة للنعماني
+    - كتاب الغيبة للطوسي
+    - كتاب المؤمن لحسين بن سعيد الكوفي الاهوازي
+    - كتاب الزهد لحسين بن سعيد الكوفي الاهوازي
+    - كتاب معاني الاخبار للصدوق
+    - كتاب معجم الاحاديث المعتبرة لمحمد اصف محسني
+    - كتاب نهج البلاغة لعلي بن ابي طالب
+    - كتاب رسالة الحقوق للامام زين العابدين
 
-    استخدم الأمر /help لعرض المساعدة والإحصائيات.
-    """
-    await update.message.reply_html(welcome_message, reply_markup=keyboard)
+    <b>طريقة الاستخدام:</b>
+    <code>شيعة [جزء من النص]</code>
+
+    <b>مثال:</b>
+    <code>شيعة باهتوهم</code>
+
+    ادعو لوالدي بالرحمة بارك الله فيكم ان استفدتم من هذا العمل
+    """ # Prayer request kept at the end of the text
+
+    await update.message.reply_html(
+        welcome_message,
+        reply_markup=InlineKeyboardMarkup(keyboard) # Pass the updated keyboard
+    )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Unchanged
+    """Handles the /help command, showing stats and adding a developer button."""
     log_user(update.effective_user.id)
     total_hadiths = get_total_hadiths_count()
     search_count = get_stat('search_count')
     user_count = get_stat('user_count')
+    start_usage_count = get_stat('start_usage')
+
+    # --- MODIFIED: Removed the problematic comment line ---
     help_text = f"""
     <b>مساعدة وإحصائيات بوت الأحاديث</b> 🕌
 
     📊 <b>الإحصائيات:</b>
     - عدد الأحاديث الفريدة في قاعدة البيانات: {total_hadiths}
     - إجمالي عمليات البحث: {search_count}
-    - عدد المستخدمين الفريدين: {user_count}
+    - عدد المستخدمين : {user_count}
+    
 
     🔍 <b>كيفية البحث:</b>
     أرسل رسالة تبدأ بـ <code>شيعة</code> أو <code>شيعه</code> ثم مسافة ثم الكلمة أو الجملة التي تريد البحث عنها.
-    مثال: <code>شيعه علي بن ابي طالب</code>
-    (يستخدم الآن البحث بالنص الكامل FTS مع تجاهل البادئات الشائعة ومنع تكرار النتائج، بالإضافة لذاكرة التخزين المؤقت Redis لتحسين الأداء)
+    مثال: <code>شيعة باهتوهم </code>
+  
+    """ # Removed the developer line and the invalid comment
 
-    ✨ <b>المطور:</b> {html.escape(DEVELOPER_NAME)}
-    """
-    await update.message.reply_html(help_text, disable_web_page_preview=True)
+    # --- MODIFIED: Added developer button ---
+    developer_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✨ المطور: عبد المجيد", url="https://t.me/j_dd_j")]
+    ])
+
+    await update.message.reply_html(
+        help_text,
+        reply_markup=developer_keyboard, # Add the developer button
+        disable_web_page_preview=True
+    )
 
 
 # --- Message Handler ---
@@ -385,7 +443,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🤷‍♂️ لم يتم العثور على نتائج لكلمة البحث '<b>{safe_search_query}</b>'.", parse_mode='HTML')
         return
 
-    # --- MODIFIED: Handle single result - Manual first part construction ---
+    # --- Handle single result - Manual first part construction ---
     if num_results == 1:
         logger.info("Found single result, manually constructing first part.")
         row_id = matching_rowids[0]
@@ -395,77 +453,54 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             actual_text = html.escape(hadith_details['arabic_text'] if hadith_details['arabic_text'] else 'النص غير متوفر')
             grading_text = html.escape(hadith_details['grading'] if hadith_details['grading'] else 'الصحة غير متوفرة')
 
-            # Construct the header part
             header = f"📖 <b>الكتاب:</b> {book}\n\n📜 <b>الحديث:</b>\n"
-            footer = f"\n\n\n⚖️ <b>الصحة:</b> {grading_text}" # Footer includes grading
+            footer = f"\n\n\n⚖️ <b>الصحة:</b> {grading_text}"
 
-            # Calculate space for text in the first message
-            # Temporarily add part numbering prefix length for calculation if needed later
-            temp_part_prefix = "<b>الجزء الأول من 99</b>\n\n" # Estimate max length
-            remaining_space = MAX_MESSAGE_LENGTH - len(header) - len(footer) - len(temp_part_prefix)
+            temp_part_prefix = "<b>الجزء الأول من 99</b>\n\n"
+            remaining_space_for_text = MAX_MESSAGE_LENGTH - len(header) - len(temp_part_prefix) - 20
 
-            # Determine how much of the actual text fits in the first part
             first_part_hadith_text = ""
-            remaining_hadith_text = actual_text # Start with the full text
+            remaining_hadith_text = actual_text
 
-            if len(actual_text) <= remaining_space:
-                # The entire hadith text fits in the first message
-                first_part_hadith_text = actual_text
-                remaining_hadith_text = "" # No remaining text
-                # Check if grading fits
-                if len(header) + len(first_part_hadith_text) + len(footer) <= MAX_MESSAGE_LENGTH:
-                    # Grading fits, append it
-                    first_part_message_content = header + first_part_hadith_text + footer
-                    remaining_parts = [] # No remaining parts
-                else:
-                    # Grading doesn't fit, it becomes the first remaining part
-                    first_part_message_content = header + first_part_hadith_text
-                    remaining_parts = split_message(footer.strip()) # Split just the footer
+            if len(actual_text) + len(footer) <= remaining_space_for_text:
+                 first_part_hadith_text = actual_text
+                 remaining_hadith_text = ""
+                 first_part_message_content = header + first_part_hadith_text + footer
+                 remaining_parts = []
+            elif len(actual_text) <= remaining_space_for_text:
+                 first_part_hadith_text = actual_text
+                 remaining_hadith_text = ""
+                 first_part_message_content = header + first_part_hadith_text
+                 remaining_parts = split_message(footer.strip())
             else:
-                # Text needs splitting. Find a good split point within remaining_space.
-                split_pos = actual_text.rfind('\n', 0, remaining_space)
-                if split_pos == -1:
-                    split_pos = actual_text.rfind(' ', 0, remaining_space)
-                if split_pos == -1 or split_pos == 0: # Force split if needed
-                    split_pos = remaining_space
-
+                split_pos = actual_text.rfind('\n', 0, remaining_space_for_text)
+                if split_pos == -1: split_pos = actual_text.rfind(' ', 0, remaining_space_for_text)
+                if split_pos == -1 or split_pos == 0: split_pos = remaining_space_for_text
                 first_part_hadith_text = actual_text[:split_pos]
-                remaining_hadith_text = actual_text[split_pos:].lstrip() # Text left for subsequent parts
-
+                remaining_hadith_text = actual_text[split_pos:].lstrip()
                 first_part_message_content = header + first_part_hadith_text
-                # Combine remaining text and footer, then split THAT for remaining parts
                 text_for_remaining_parts = remaining_hadith_text + footer
                 remaining_parts = split_message(text_for_remaining_parts)
 
-            # Calculate total parts count
             total_parts_count = 1 + len(remaining_parts)
 
-            # Add the "الجزء" prefix to the first part content if needed
             if total_parts_count > 1:
                 part_num_word = arabic_number_to_word(1)
                 message_to_send = f"<b>الجزء {part_num_word} من {total_parts_count}</b>\n\n{first_part_message_content}"
             else:
                 message_to_send = first_part_message_content
 
-            # Ensure message doesn't exceed limit (safety check)
             if len(message_to_send) > MAX_MESSAGE_LENGTH:
                  logger.warning(f"Calculated first message exceeds limit ({len(message_to_send)} > {MAX_MESSAGE_LENGTH}). Truncating.")
                  message_to_send = message_to_send[:MAX_MESSAGE_LENGTH]
 
-
-            # --- Send the first part ---
             message_sent = await update.message.reply_html(text=message_to_send)
             logger.info(f"Sent part 1 (single search result, manually constructed) for rowid {row_id}, message_id {message_sent.message_id}")
 
-            # --- Add the "More" button by editing if needed ---
             if total_parts_count > 1:
-                # Store remaining parts in context for the 'more' handler
-                # Key: message_id of the first part message
                 context.user_data[f'remaining_parts_{message_sent.message_id}'] = remaining_parts
                 context.user_data[f'total_parts_{message_sent.message_id}'] = total_parts_count
-
-                # Callback data now only needs message_id and the *next* part index (which is 1, representing the first of the remaining_parts)
-                callback_data_more = f"more_{message_sent.message_id}_1" # Part index refers to remaining_parts index + 1
+                callback_data_more = f"more_{message_sent.message_id}_1"
                 keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد 👇", callback_data=callback_data_more)]])
                 try:
                     await context.bot.edit_message_reply_markup(
@@ -486,7 +521,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle 2-10 results (Snippet logic unchanged)
     if 1 < num_results <= 10:
-        # ... (Snippet generation logic remains the same) ...
         logger.info(f"Found {num_results} unique results, displaying snippets.")
         response_text = f"💡 تم العثور على <b>{num_results}</b> نتائج فريدة للبحث عن '<b>{safe_search_query}</b>':\n\n"
         buttons = []
@@ -496,7 +530,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 book = html.escape(hadith_details['book'] if hadith_details['book'] else 'غير متوفر')
                 text_unescaped = hadith_details['arabic_text'] if hadith_details['arabic_text'] else ''
 
-                # Snippet Generation
                 context_snippet = "..."
                 found_keyword = None
                 keyword_index = -1
@@ -541,9 +574,8 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 truncated_book = book[:25] + ('...' if len(book) > 25 else '')
                 simple_snippet_words = text_unescaped.split()
                 simple_snippet = " ".join(simple_snippet_words[:5]) + ('...' if len(simple_snippet_words) > 5 else '')
-                # Pass row_id for the view action
                 button_text = f"📜 {truncated_book} - {html.escape(simple_snippet)}"
-                callback_data = f"view_{row_id}" # Changed back to view_rowid
+                callback_data = f"view_{row_id}"
                 buttons.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
             else: logger.warning(f"Could not retrieve details for rowid {row_id} during snippet generation.")
 
@@ -576,19 +608,17 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         action, value = data.split('_', 1)
 
-        # --- MODIFIED: Handle "view" action - Manual first part construction ---
+        # --- Handle "view" action - Manual first part construction ---
         if action == "view":
             row_id = int(value)
             hadith_details = get_hadith_details_by_db_id(row_id)
             if hadith_details:
-                # Delete the message with the list of buttons
                 try:
                     await query.delete_message()
                     logger.info(f"Deleted original button list message {query.message.message_id}")
                 except telegram.error.BadRequest as e:
                     logger.warning(f"Could not delete original button list message {query.message.message_id}: {e}")
 
-                # --- Manual First Part Construction (Similar to handle_search) ---
                 book = html.escape(hadith_details['book'] if hadith_details['book'] else 'غير متوفر')
                 actual_text = html.escape(hadith_details['arabic_text'] if hadith_details['arabic_text'] else 'النص غير متوفر')
                 grading_text = html.escape(hadith_details['grading'] if hadith_details['grading'] else 'الصحة غير متوفرة')
@@ -597,24 +627,25 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 footer = f"\n\n\n⚖️ <b>الصحة:</b> {grading_text}"
 
                 temp_part_prefix = "<b>الجزء الأول من 99</b>\n\n"
-                remaining_space = MAX_MESSAGE_LENGTH - len(header) - len(footer) - len(temp_part_prefix)
+                remaining_space_for_text = MAX_MESSAGE_LENGTH - len(header) - len(temp_part_prefix) - 20
 
                 first_part_hadith_text = ""
                 remaining_hadith_text = actual_text
 
-                if len(actual_text) <= remaining_space:
-                    first_part_hadith_text = actual_text
-                    remaining_hadith_text = ""
-                    if len(header) + len(first_part_hadith_text) + len(footer) <= MAX_MESSAGE_LENGTH:
-                        first_part_message_content = header + first_part_hadith_text + footer
-                        remaining_parts = []
-                    else:
-                        first_part_message_content = header + first_part_hadith_text
-                        remaining_parts = split_message(footer.strip())
+                if len(actual_text) + len(footer) <= remaining_space_for_text:
+                     first_part_hadith_text = actual_text
+                     remaining_hadith_text = ""
+                     first_part_message_content = header + first_part_hadith_text + footer
+                     remaining_parts = []
+                elif len(actual_text) <= remaining_space_for_text:
+                     first_part_hadith_text = actual_text
+                     remaining_hadith_text = ""
+                     first_part_message_content = header + first_part_hadith_text
+                     remaining_parts = split_message(footer.strip())
                 else:
-                    split_pos = actual_text.rfind('\n', 0, remaining_space)
-                    if split_pos == -1: split_pos = actual_text.rfind(' ', 0, remaining_space)
-                    if split_pos == -1 or split_pos == 0: split_pos = remaining_space
+                    split_pos = actual_text.rfind('\n', 0, remaining_space_for_text)
+                    if split_pos == -1: split_pos = actual_text.rfind(' ', 0, remaining_space_for_text)
+                    if split_pos == -1 or split_pos == 0: split_pos = remaining_space_for_text
                     first_part_hadith_text = actual_text[:split_pos]
                     remaining_hadith_text = actual_text[split_pos:].lstrip()
                     first_part_message_content = header + first_part_hadith_text
@@ -633,8 +664,6 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                      logger.warning(f"Calculated first message (view) exceeds limit ({len(message_to_send)} > {MAX_MESSAGE_LENGTH}). Truncating.")
                      message_to_send = message_to_send[:MAX_MESSAGE_LENGTH]
 
-                # --- Send the first part ---
-                # Send as a new message in the chat
                 message_sent = await context.bot.send_message(
                     chat_id=query.message.chat_id,
                     text=message_to_send,
@@ -642,7 +671,6 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
                 logger.info(f"Sent part 1 (view action, manually constructed) for rowid {row_id}, message_id {message_sent.message_id}")
 
-                # --- Add the "More" button by editing if needed ---
                 if total_parts_count > 1:
                     context.user_data[f'remaining_parts_{message_sent.message_id}'] = remaining_parts
                     context.user_data[f'total_parts_{message_sent.message_id}'] = total_parts_count
@@ -664,27 +692,23 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                  await context.bot.send_message(chat_id=query.message.chat_id, text="⚠️ خطأ: لم يتم العثور على تفاصيل الحديث المحدد في قاعدة البيانات.")
 
 
-        # --- MODIFIED: Handle "more" action - Use remaining_parts from context ---
+        # --- Handle "more" action - Use remaining_parts from context ---
         elif action == "more":
             value_parts = value.split('_')
-            if len(value_parts) == 2: # Expecting more_originalMessageId_nextPartIndex (relative to remaining_parts)
-                original_message_id = int(value_parts[0]) # ID of the message containing the previous part
-                # next_part_index is 1-based for display, 0-based for list index
-                next_remaining_part_index = int(value_parts[1]) - 1 # Index in the remaining_parts list
+            if len(value_parts) == 2: # Expecting more_originalMessageId_nextPartIndex
+                original_message_id = int(value_parts[0])
+                next_remaining_part_index = int(value_parts[1]) - 1
 
-                # Retrieve remaining parts and total count from context
                 remaining_parts = context.user_data.get(f'remaining_parts_{original_message_id}')
                 total_parts = context.user_data.get(f'total_parts_{original_message_id}')
 
                 if remaining_parts is not None and total_parts is not None and 0 <= next_remaining_part_index < len(remaining_parts):
                     current_part_text = remaining_parts[next_remaining_part_index]
-                    # The overall part number is next_remaining_part_index + 2
                     current_part_display_num = next_remaining_part_index + 2
                     part_num_word = arabic_number_to_word(current_part_display_num)
 
                     part_text_with_title = f"<b>الجزء {part_num_word} من {total_parts}</b>\n\n{current_part_text}"
 
-                    # Send the next part as a NEW message
                     new_message = await context.bot.send_message(
                         chat_id=query.message.chat_id,
                         text=part_text_with_title,
@@ -692,7 +716,6 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                     )
                     logger.info(f"Sent part {current_part_display_num} (more action) message_id {new_message.message_id}")
 
-                    # Remove button from the PREVIOUS message
                     try:
                         await context.bot.edit_message_reply_markup(
                             chat_id=query.message.chat_id,
@@ -700,7 +723,6 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                             reply_markup=None
                         )
                         logger.info(f"Removed 'More' button from previous message {original_message_id}")
-                        # Clean up context data for the previous message
                         context.user_data.pop(f'remaining_parts_{original_message_id}', None)
                         context.user_data.pop(f'total_parts_{original_message_id}', None)
 
@@ -709,14 +731,10 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                     except telegram.error.TelegramError as e:
                          logger.error(f"Telegram error removing 'More' button from message {original_message_id}: {e}")
 
-                    # Add "More" button to the NEW message if needed
                     if current_part_display_num < total_parts:
-                        # Store remaining parts and total count for the *new* message
-                        context.user_data[f'remaining_parts_{new_message.message_id}'] = remaining_parts # Pass the same list
-                        context.user_data[f'total_parts_{new_message.message_id}'] = total_parts # Pass the same total
-
-                        # Next index is current display num (which is next_remaining_part_index + 2)
-                        callback_data_next = f"more_{new_message.message_id}_{current_part_display_num}"
+                        context.user_data[f'remaining_parts_{new_message.message_id}'] = remaining_parts
+                        context.user_data[f'total_parts_{new_message.message_id}'] = total_parts
+                        callback_data_next = f"more_{new_message.message_id}_{current_part_display_num + 1}"
                         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد 👇", callback_data=callback_data_next)]])
                         try:
                             await context.bot.edit_message_reply_markup(
@@ -731,7 +749,6 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                              logger.error(f"Telegram error adding 'More' button to new message {new_message.message_id}: {e}")
                 else:
                      logger.warning(f"Could not find remaining parts in context or index out of bounds for 'more' callback: {data}")
-                     # Attempt to remove button from the clicked message even if data is bad
                      try: await context.bot.edit_message_reply_markup(chat_id=query.message.chat_id, message_id=original_message_id, reply_markup=None)
                      except Exception: pass
             else:
@@ -780,8 +797,9 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
 
-    # Register handlers (unchanged)
-    application.add_handler(CommandHandler("start", start))
+    # Register handlers
+    # --- MODIFIED: Use 'start_command' for the /start command ---
+    application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     search_pattern = r'^(شيعة|شيعه)\s+(.+)$'
     application.add_handler(MessageHandler(filters.Regex(search_pattern) & ~filters.COMMAND, handle_search))
