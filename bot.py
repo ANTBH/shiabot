@@ -17,19 +17,19 @@ import uuid # For generating unique IDs for approved hadiths
 from datetime import datetime # For submission timestamp
 
 # --- Configuration ---
-BOT_TOKEN = "7448719208:AAH5jFHRNm2ZR-GZch-6SnxGFxIFuZsAldM"  # Token المستخدم
+BOT_TOKEN = "7378891608:AAFUPueUuSAPHd4BPN8znb-jcDGsjnnm_f8"  # Token المستخدم
 JSON_FILE = '1.json'     # اسم ملف الأحاديث JSON
 DB_NAME = 'hadith_bot.db'      # اسم ملف قاعدة البيانات SQLite
 DEVELOPER_NAME = "عبد المجيد" # اسم المطور
 MAX_MESSAGE_LENGTH = 4000      # الحد الأقصى لطول رسالة تليجرام
-SNIPPET_CONTEXT_WORDS = 8      # Number of words before/after keyword in snippet
-BOT_OWNER_ID = 6504095190       # !!! معرف المستخدم الخاص بالمالك !!! (تم وضع معرفك كمثال)
+SNIPPET_CONTEXT_WORDS = 5      # Number of words before/after keyword in snippet
+BOT_OWNER_ID = 6504095190       # !!! معرف المستخدم الخاص بالمالك !!!
 
 # --- Redis Configuration ---
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_DB = 0
-CACHE_EXPIRY_SECONDS = 55555555555555    # مدة صلاحية الكاش (مثال: ساعة واحدة)
+CACHE_EXPIRY_SECONDS = 360000000000    # مدة صلاحية الكاش (مثال: ساعة واحدة)
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -63,6 +63,32 @@ def get_redis_connection() -> Optional[redis.Redis]:
              return None
     return None
 
+# --- MODIFIED: Added Arabic Text Normalization ---
+# Pre-compile regex patterns for efficiency
+alef_regex = re.compile(r'[أإآ]')
+taa_marbuta_regex = re.compile(r'ة')
+yaa_regex = re.compile(r'ى')
+# Diacritics regex (covers most common ones)
+diacritics_regex = re.compile(r'[\u064B-\u0652]') # Tashkeel Fathatan to Sukun
+# Specific character replacements requested by user
+zaal_regex = re.compile(r'ذ')
+# Optional: remove tatweel/kashida
+# tatweel_regex = re.compile(r'ـ')
+
+def normalize_arabic(text: str) -> str:
+    """Applies basic Arabic normalization to a string."""
+    if not text:
+        return ""
+    text = alef_regex.sub('ا', text)      # Normalize Alef forms to basic Alef
+    text = taa_marbuta_regex.sub('ه', text) # Normalize Taa Marbuta to Haa
+    text = yaa_regex.sub('ي', text)       # Normalize Alef Maksura to Yaa
+    text = diacritics_regex.sub('', text)   # Remove diacritics (Tashkeel)
+    text = zaal_regex.sub('د', text)      # Replace Dhaal with Daal
+    # text = tatweel_regex.sub('', text)  # Optional: Remove Tatweel
+    return text
+# --- End Normalization ---
+
+
 # --- Database Functions ---
 
 def get_db_connection() -> sqlite3.Connection:
@@ -73,7 +99,6 @@ def get_db_connection() -> sqlite3.Connection:
 
 def init_db():
     """Initializes the database, creating necessary tables."""
-    # Unchanged
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -82,21 +107,24 @@ def init_db():
         cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", ('user_count', 0))
         cursor.execute("INSERT OR IGNORE INTO stats (key, value) VALUES (?, ?)", ('start_usage', 0))
         cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
+        # --- MODIFIED: Added FTS5 tokenizer option ---
         cursor.execute('''
             CREATE VIRTUAL TABLE IF NOT EXISTS hadiths_fts USING fts5(
                 original_id,
                 book UNINDEXED,
-                arabic_text,
-                grading UNINDEXED
+                arabic_text, -- This will store the NORMALIZED text for searching
+                grading UNINDEXED,
+                tokenize="unicode61 remove_diacritics 2" -- Recommended tokenizer for Arabic
             );
         ''')
+        # --- End Modification ---
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS pending_hadiths (
                 submission_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 submitter_id INTEGER NOT NULL,
                 submitter_username TEXT,
                 book TEXT NOT NULL,
-                arabic_text TEXT NOT NULL,
+                arabic_text TEXT NOT NULL, -- Store original text here
                 grading TEXT,
                 submission_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 approval_message_id INTEGER NULL
@@ -104,13 +132,13 @@ def init_db():
         ''')
         conn.commit()
         conn.close()
-        logger.info("Database initialized successfully (including pending_hadiths table).")
+        logger.info("Database initialized successfully (including pending_hadiths table and FTS tokenizer).")
     except sqlite3.Error as e:
         logger.error(f"Database initialization error: {e}")
         raise
 
 def populate_db_from_json(filename: str):
-    # Unchanged
+    """Populates the FTS table from a JSON file, applying normalization."""
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -118,6 +146,7 @@ def populate_db_from_json(filename: str):
         count = cursor.fetchone()[0]
         if count == 0:
             logger.info("FTS Hadiths table is empty. Populating from JSON file...")
+            logger.warning("IMPORTANT: Database will be populated with NORMALIZED text for searching.")
             try:
                 with open(filename, 'r', encoding='utf-8') as f: data = json.load(f)
                 added_count = 0
@@ -126,17 +155,31 @@ def populate_db_from_json(filename: str):
                     cleaned_text = re.sub(r"^\s*\d+[\sـ.-]*", "", text).strip()
                     original_id_str = str(hadith.get('id', f'gen_{added_count}'))
                     if not cleaned_text: continue
+
+                    # --- MODIFIED: Normalize text before inserting ---
+                    normalized_text = normalize_arabic(cleaned_text)
+                    # --- End Modification ---
+
                     cursor.execute(
                         "INSERT INTO hadiths_fts (original_id, book, arabic_text, grading) VALUES (?, ?, ?, ?)",
-                        (original_id_str, hadith.get('book'), cleaned_text, hadith.get('majlisiGrading'))
+                        (original_id_str, hadith.get('book'), normalized_text, hadith.get('majlisiGrading')) # Insert normalized text
                     )
                     added_count += 1
                 conn.commit()
-                logger.info(f"Successfully added {added_count} hadiths to the FTS database.")
+                logger.info(f"Successfully added {added_count} hadiths to the FTS database (Normalized).")
             except FileNotFoundError: logger.error(f"Error: JSON file '{filename}' not found during population.")
             except json.JSONDecodeError: logger.error(f"Error: Could not decode JSON from '{filename}'. Check file format.")
             except Exception as e: logger.error(f"An unexpected error occurred loading hadiths from JSON: {e}")
-        else: logger.info("FTS Hadiths table already populated.")
+        else:
+            logger.info("FTS Hadiths table already populated.")
+            # --- Add check/warning for existing non-normalized data ---
+            logger.warning("----------------------------------------------------------------")
+            logger.warning("WARNING: Database already exists. If it wasn't populated with")
+            logger.warning("         NORMALIZED text previously, search results might be")
+            logger.warning("         inconsistent. Delete 'hadith_bot.db' and restart")
+            logger.warning("         the script for correct normalization.")
+            logger.warning("----------------------------------------------------------------")
+            # --- End check ---
     except sqlite3.Error as e:
         logger.error(f"Database error during FTS population check/insert: {e}")
     finally: conn.close()
@@ -226,46 +269,68 @@ def split_message(text: str) -> List[str]:
     return parts
 
 def search_hadiths_db(query: str) -> List[int]:
-    """Searches hadiths using FTS, prefixes, deduplication."""
-    # Unchanged (Reverted fuzzy search)
+    """
+    Searches hadiths using FTS. Normalizes query, includes prefix handling,
+    and deduplicates results based on original_id. Checks Redis cache first.
+    Returns a list of unique FTS rowids.
+    """
     if not query: return []
-    normalized_query = query.strip().lower()
-    cache_key = f"hadith_search_unique:{normalized_query}"
+
+    # --- MODIFIED: Normalize the search query ---
+    original_query_str = query.strip() # Keep original for potential display/logging
+    normalized_search_query = normalize_arabic(original_query_str)
+    logger.debug(f"Original query: '{original_query_str}', Normalized for search: '{normalized_search_query}'")
+    # --- End Modification ---
+
+    # Use normalized query for cache key to match normalized index
+    cache_key = f"hadith_search_norm_unique:{normalized_search_query.lower()}" # New cache key based on normalized query
+
     redis_conn = get_redis_connection()
     cached_result = None
+
+    # 1. Check Redis Cache
     if redis_conn:
         try:
             cached_data = redis_conn.get(cache_key)
             if cached_data:
                 cached_result = json.loads(cached_data.decode('utf-8'))
                 if isinstance(cached_result, list):
-                    logger.info(f"Cache HIT for unique query '{query}'. Found {len(cached_result)} results in Redis.")
+                    logger.info(f"Cache HIT for normalized query '{normalized_search_query}'. Found {len(cached_result)} results in Redis.")
                     return cached_result
-                else:
-                    logger.warning(f"Invalid data type in cache for key '{cache_key}'. Ignoring cache.")
-                    redis_conn.delete(cache_key)
-            else: logger.info(f"Cache MISS for unique query '{query}'.")
-        except json.JSONDecodeError:
-            logger.error(f"Error decoding cached JSON for key '{cache_key}'. Ignoring cache.")
-            if redis_conn: redis_conn.delete(cache_key)
+                else: logger.warning(f"Invalid cache data type for key '{cache_key}'. Ignoring."); redis_conn.delete(cache_key)
+            else: logger.info(f"Cache MISS for normalized query '{normalized_search_query}'.")
+        except json.JSONDecodeError: logger.error(f"Error decoding cache for key '{cache_key}'. Ignoring."); redis_conn.delete(cache_key) if redis_conn else None
         except redis.exceptions.RedisError as e: logger.error(f"Redis error getting cache for key '{cache_key}': {e}")
         except Exception as e: logger.error(f"Unexpected error during Redis cache get: {e}")
 
-    logger.info(f"Searching SQLite FTS for query '{query}' with prefixes and deduplication.")
+    logger.info(f"Searching SQLite FTS for normalized query '{normalized_search_query}' with prefixes and deduplication.")
+    # 2. Search SQLite FTS
     conn = get_db_connection()
     cursor = conn.cursor()
     unique_rowids = []
     seen_original_ids: Set[str] = set()
+
     try:
+        # --- MODIFIED: Build FTS query using the NORMALIZED query ---
         prefixes = ['و', 'ف', 'ب', 'ل', 'ك']
-        fts_query_parts = [f'"{query}"']
-        for p in prefixes: fts_query_parts.append(f'"{p}{query}"')
+        # Apply prefixes to the normalized query
+        fts_query_parts = [f'"{normalized_search_query}"']
+        for p in prefixes:
+            fts_query_parts.append(f'"{p}{normalized_search_query}"')
         fts_match_query = " OR ".join(fts_query_parts)
+        # --- End Modification ---
+
         logger.debug(f"Constructed FTS MATCH query: {fts_match_query}")
-        cursor.execute("SELECT rowid, original_id FROM hadiths_fts WHERE hadiths_fts MATCH ? ORDER BY rank", (fts_match_query,))
+        # Query the FTS table (which contains normalized text)
+        cursor.execute(
+            "SELECT rowid, original_id FROM hadiths_fts WHERE hadiths_fts MATCH ? ORDER BY rank",
+            (fts_match_query,)
+        )
         results = cursor.fetchall()
-        logger.info(f"Raw FTS Search for '{query}' found {len(results)} potential matches.")
-        logger.debug(f"Starting deduplication for query '{query}'.")
+        logger.info(f"Raw FTS Search for normalized '{normalized_search_query}' found {len(results)} potential matches.")
+
+        # Deduplication (Unchanged logic, still uses original_id)
+        logger.debug(f"Starting deduplication for query '{original_query_str}'.")
         for row in results:
             rowid = row['rowid']; original_id = row['original_id']
             logger.debug(f"  Processing rowid: {rowid}, original_id: '{original_id}' (type: {type(original_id)})")
@@ -276,25 +341,37 @@ def search_hadiths_db(query: str) -> List[int]:
                 seen_original_ids.add(original_id_str); unique_rowids.append(rowid)
             else: logger.debug(f"    -> Skipping rowid {rowid} (duplicate original_id: '{original_id_str}')")
         logger.debug(f"Finished deduplication. Seen IDs count: {len(seen_original_ids)}. Unique rowids: {len(unique_rowids)}")
+
+        # 3. Cache the deduplicated result
         if unique_rowids and redis_conn:
             try:
                 serialized_results = json.dumps(unique_rowids)
                 redis_conn.set(cache_key, serialized_results, ex=CACHE_EXPIRY_SECONDS)
-                logger.info(f"Cached {len(unique_rowids)} unique results for query '{query}' in Redis.")
+                logger.info(f"Cached {len(unique_rowids)} unique results for normalized query '{normalized_search_query}' in Redis.")
             except redis.exceptions.RedisError as e: logger.error(f"Redis error setting cache for key '{cache_key}': {e}")
             except Exception as e: logger.error(f"Unexpected error during Redis cache set: {e}")
+
     except sqlite3.Error as e:
-        if "malformed MATCH expression" in str(e): logger.warning(f"FTS query syntax error for query '{query}' (constructed: {fts_match_query}): {e}")
-        else: logger.error(f"Database FTS search error for query '{query}': {e}")
+        if "malformed MATCH expression" in str(e): logger.warning(f"FTS query syntax error for query '{original_query_str}' (normalized: '{normalized_search_query}', constructed: {fts_match_query}): {e}")
+        else: logger.error(f"Database FTS search error for query '{original_query_str}' (normalized: '{normalized_search_query}'): {e}")
     finally: conn.close()
     return unique_rowids
 
+
 def get_hadith_details_by_db_id(row_id: int) -> Optional[sqlite3.Row]:
-    # Unchanged
+    """Fetches hadith details. NOTE: Fetches from FTS table, so arabic_text will be NORMALIZED."""
+    # The text displayed will be the normalized version stored in the FTS table.
+    # If displaying the *original* non-normalized text is crucial,
+    # you would need to store it separately (e.g., in another table or an UNINDEXED
+    # column in the FTS table during population) and fetch/display that instead.
     conn = get_db_connection()
     cursor = conn.cursor()
     hadith_details = None
-    try: cursor.execute("SELECT rowid, original_id, book, arabic_text, grading FROM hadiths_fts WHERE rowid = ?", (row_id,)); hadith_details = cursor.fetchone()
+    try:
+        cursor.execute("SELECT rowid, original_id, book, arabic_text, grading FROM hadiths_fts WHERE rowid = ?", (row_id,))
+        hadith_details = cursor.fetchone()
+        if hadith_details: logger.debug(f"Fetched details for rowid {row_id}. Text (normalized): {hadith_details['arabic_text'][:100]}...")
+        else: logger.warning(f"No details found for rowid {row_id}")
     except sqlite3.Error as e: logger.error(f"Error fetching hadith details for rowid {row_id}: {e}")
     finally: conn.close()
     return hadith_details
@@ -311,7 +388,7 @@ async def add_hadith_start(update: Update, context: ContextTypes.DEFAULT_TYPE, i
     user_id = update.effective_user.id
     logger.info(f"User {user_id} started 'add hadith' process (is_button={is_button}).")
     await reply_target.reply_text(
-        "أهلاً بك في خدمة إضافة حديث جديد.\n"
+        "أهلاً بك في خاصية إضافة حديث جديد.\n"
         "الرجاء إرسال <b>اسم الكتاب</b> أولاً.\n\n"
         "لإلغاء العملية في أي وقت، أرسل /cancel.",
         parse_mode='HTML'
@@ -330,9 +407,7 @@ async def receive_book(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """Stores the book name and asks for the hadith text."""
     # Unchanged
     book_name = update.message.text.strip()
-    if not book_name:
-        await update.message.reply_text("لم يتم إرسال اسم الكتاب. الرجاء إرسال اسم الكتاب.")
-        return ASK_BOOK
+    if not book_name: await update.message.reply_text("لم يتم إرسال اسم الكتاب. الرجاء إرسال اسم الكتاب."); return ASK_BOOK
     context.user_data['new_hadith_book'] = book_name
     logger.info(f"Received book name: {book_name}")
     await update.message.reply_text("شكرًا لك. الآن الرجاء إرسال <b>نص الحديث</b> كاملاً.", parse_mode='HTML')
@@ -342,12 +417,10 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     """Stores the hadith text and asks for the grading."""
     # Unchanged
     hadith_text = update.message.text.strip()
-    if not hadith_text:
-        await update.message.reply_text("لم يتم إرسال نص الحديث. الرجاء إرسال نص الحديث.")
-        return ASK_TEXT
-    context.user_data['new_hadith_text'] = hadith_text
+    if not hadith_text: await update.message.reply_text("لم يتم إرسال نص الحديث. الرجاء إرسال نص الحديث."); return ASK_TEXT
+    context.user_data['new_hadith_text'] = hadith_text # Store original text
     logger.info(f"Received hadith text (length {len(hadith_text)}).")
-    await update.message.reply_text("ممتاز. أخيراً، الرجاء إرسال <b> صحة الحديث</b> (إن وجدت، أو اضغط /skip للتخطي).", parse_mode='HTML')
+    await update.message.reply_text("ممتاز. أخيراً، الرجاء إرسال <b>  تصنيف الحديث</b> (إن وجدت، أو اضغط /skip للتخطي).", parse_mode='HTML')
     return ASK_GRADING
 
 async def receive_grading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -364,30 +437,24 @@ async def skip_grading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     # Unchanged
     context.user_data['new_hadith_grading'] = None
     logger.info("Grading step skipped.")
-    await update.message.reply_text("تم تخطي تصنيف الحديث .")
+    await update.message.reply_text("تم تخطي  تصنيف الحديث.")
     await save_and_notify_owner(update, context)
     return ConversationHandler.END
 
 async def save_and_notify_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Saves the pending hadith to DB and notifies the owner."""
-    # Unchanged (Includes updated confirmation message)
+    """Saves the pending hadith (original text) to DB and notifies the owner."""
+    # Unchanged (saves original text to pending)
     user = update.effective_user
     book = context.user_data.get('new_hadith_book')
-    text = context.user_data.get('new_hadith_text')
+    text = context.user_data.get('new_hadith_text') # Original Text
     grading = context.user_data.get('new_hadith_grading', 'لم يحدد')
 
-    if not book or not text:
-        logger.error("Missing book or text when trying to save pending hadith.")
-        await update.message.reply_text("حدث خطأ. بعض المعلومات ناقصة. يرجى المحاولة مرة أخرى باستخدام /addhadith.")
-        context.user_data.clear(); return
+    if not book or not text: logger.error("Missing book or text when trying to save pending hadith."); await update.message.reply_text("حدث خطأ. بعض المعلومات ناقصة. يرجى المحاولة مرة أخرى باستخدام /addhadith."); context.user_data.clear(); return
 
     submission_id = None
     try:
         conn = get_db_connection(); cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO pending_hadiths (submitter_id, submitter_username, book, arabic_text, grading) VALUES (?, ?, ?, ?, ?)",
-            (user.id, user.username or 'N/A', book, text, grading)
-        )
+        cursor.execute("INSERT INTO pending_hadiths (submitter_id, submitter_username, book, arabic_text, grading) VALUES (?, ?, ?, ?, ?)", (user.id, user.username or 'N/A', book, text, grading))
         submission_id = cursor.lastrowid; conn.commit(); conn.close()
         logger.info(f"Saved pending hadith with submission_id: {submission_id}")
         await update.message.reply_text("شكراً لك، سيتم مراجعة الحديث والموافقة عليه قريباً إن شاء الله.")
@@ -422,14 +489,13 @@ async def cancel_submission(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Cancels the conversation."""
     # Unchanged
     context.user_data.clear()
-    await update.message.reply_text("تم إلغاء عملية إضافة الرواية.")
+    await update.message.reply_text("تم إلغاء عملية إضافة الحديث.")
     return ConversationHandler.END
 
 # --- Approval Callback Handler ---
 
 async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the owner's approval or rejection."""
-    # Unchanged
     query = update.callback_query; await query.answer(); data = query.data; user_id = query.from_user.id
     if user_id != BOT_OWNER_ID: await context.bot.send_message(chat_id=user_id, text="ليس لديك الصلاحية للموافقة أو الرفض."); logger.warning(f"Unauthorized attempt to handle approval by user {user_id} for data {data}"); return
     logger.info(f"Approval callback received from owner: {data}")
@@ -438,17 +504,28 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
 
     conn = get_db_connection(); cursor = conn.cursor()
     try:
+        # Fetch original text from pending table
         cursor.execute("SELECT submitter_id, book, arabic_text, grading FROM pending_hadiths WHERE submission_id = ?", (submission_id,))
         pending_hadith = cursor.fetchone()
         if not pending_hadith: logger.warning(f"Pending hadith with submission_id {submission_id} not found for action '{action}'."); await query.edit_message_text(text=f"لم يتم العثور على الطلب رقم {submission_id} (ربما تمت معالجته مسبقاً)."); return
-        submitter_id = pending_hadith['submitter_id']; book = pending_hadith['book']; text = pending_hadith['arabic_text']; grading = pending_hadith['grading']
+
+        submitter_id = pending_hadith['submitter_id']; book = pending_hadith['book']
+        original_text = pending_hadith['arabic_text'] # Get original text
+        grading = pending_hadith['grading']
+
         if action == "approve":
             try:
+                # --- MODIFIED: Normalize text before inserting into FTS ---
+                normalized_text_to_insert = normalize_arabic(original_text)
+                # --- End Modification ---
                 new_original_id = str(uuid.uuid4())
-                cursor.execute("INSERT INTO hadiths_fts (original_id, book, arabic_text, grading) VALUES (?, ?, ?, ?)", (new_original_id, book, text, grading))
+                cursor.execute(
+                    "INSERT INTO hadiths_fts (original_id, book, arabic_text, grading) VALUES (?, ?, ?, ?)",
+                    (new_original_id, book, normalized_text_to_insert, grading) # Insert normalized text
+                )
                 cursor.execute("DELETE FROM pending_hadiths WHERE submission_id = ?", (submission_id,))
                 conn.commit(); logger.info(f"Approved and added hadith from submission {submission_id} with new ID {new_original_id}")
-                await query.edit_message_text(text=f"✅ تمت الموافقة على الرواية رقم {submission_id} وإضافته بنجاح.\n\n{query.message.text}", parse_mode='HTML')
+                await query.edit_message_text(text=f"✅ تمت الموافقة على الحديث رقم {submission_id} وإضافته بنجاح.\n\n{query.message.text}", parse_mode='HTML')
                 await context.bot.send_message(chat_id=submitter_id, text=f"🎉 تمت الموافقة على الحديث الذي أرسلته حول '{book[:30]}...' وتمت إضافته لقاعدة البيانات!")
             except sqlite3.Error as e: conn.rollback(); logger.error(f"Database error approving submission {submission_id}: {e}"); await query.edit_message_text(text=f"⚠️ حدث خطأ في قاعدة البيانات أثناء الموافقة على الطلب {submission_id}.")
             except Exception as e: conn.rollback(); logger.error(f"Unexpected error approving submission {submission_id}: {e}"); await query.edit_message_text(text=f"⚠️ حدث خطأ غير متوقع أثناء الموافقة على الطلب {submission_id}.")
@@ -479,9 +556,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = html.escape(user.first_name)
     welcome_message = f"""
     <b>مرحبا {user_name}!
-    أنا بوت كاشف أحاديث الشيعة في قاعدة بياناتي اكثر من 26152 رواية تستطيع اضافة اي رواية لقاعدة بياناتي من اجل ان افيد اهل السنة في حوار الشيعة  🔍</b>
+    أنا بوت كاشف أحاديث الشيعة 🔍 في قاعدة بياناتي اكثر من 26152 حديث ورواية تستطيع ايضا اضافة حديث لقاعدة بياناتي من اجل ان يستفيد اهل السنة مني </b>
 
-    <i> الكتب في قاعدة البيانات:</i>
+    <i> الكتب الموجودة في قاعدة البيانات:</i>
     - كتاب الكافي للكليني مع التصحيح من مراة العقول للمجلسي
     - جميع الاحاديث الموجودة في عيون اخبار الرضا للصدوق
     - كتاب نهج البلاغة
@@ -501,14 +578,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     - كتاب معجم الاحاديث المعتبرة لمحمد اصف محسني
     - كتاب نهج البلاغة لعلي بن ابي طالب
     - كتاب رسالة الحقوق للامام زين العابدين
-
+    
     <b>طريقة الاستخدام:</b>
     <code>شيعة [جزء من النص]</code>
 
     <b>مثال:</b>
     <code>شيعة باهتوهم</code>
 
-    يمكنك أيضاً إضافة حديث جديد باستخدام الأمر /addhadith أو الزر أدناه.
+    يمكنك أيضاً إضافة حديث جديد باستخدام الأمر /addhadith أو الزر ادناه او كتابة امر اضافة حديث سواء في المحادثة معي او في المجموعة التي فيها البوت.
 
     ادعو لوالدي بالرحمة بارك الله فيكم ان استفدتم من هذا العمل
     """
@@ -524,16 +601,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_count = get_stat('user_count')
     start_usage_count = get_stat('start_usage')
     help_text = f"""
-    <b>مساعدة وإحصائيات بوت الأحاديث</b> 
+    <b>مساعدة وإحصائيات بوت الأحاديث</b> 🕌
 
     📊 <b>الإحصائيات:</b>
     - عدد الأحاديث في قاعدة البيانات: {total_hadiths}
     - إجمالي عمليات البحث: {search_count}
-    - عدد المستخدمين : {user_count}
+    - عدد المستخدمين الفريدين: {user_count}
 
     🔍 <b>كيفية البحث:</b>
     أرسل رسالة تبدأ بـ <code>شيعة</code> أو <code>شيعه</code> ثم مسافة ثم الكلمة أو الجملة التي تريد البحث عنها.
-    مثال: <code>شيعه باهتوهم   </code>
+    مثال: <code>شيعه  باهتوهم  </code>
 
     ➕ <b>إضافة حديث:</b>
     استخدم الأمر /addhadith أو النص "اضافة حديث" لبدء عملية إضافة حديث جديد للمراجعة.
@@ -546,14 +623,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles incoming messages starting with 'شيعة' or 'شيعه' followed by search terms."""
-    # Unchanged (using reverted search logic)
     user_id = update.effective_user.id
     message_text = update.message.text.strip()
     match = re.match(r'^(شيعة|شيعه)\s+(.+)', message_text, re.IGNORECASE | re.UNICODE)
     if not match:
-        if message_text == "اضافة حديث":
-             logger.debug(f"Ignoring 'اضافة حديث' text in handle_search, letting ConversationHandler take over.")
-             return
+        if message_text == "اضافة حديث": logger.debug(f"Ignoring 'اضافة حديث' text in handle_search, letting ConversationHandler take over."); return
         elif message_text.lower() in ['شيعة', 'شيعه']: await update.message.reply_text("⚠️ يرجى كتابة كلمة البحث بعد 'شيعة' أو 'شيعه'.\nمثال: <code>شيعة علي</code>", parse_mode='HTML')
         else: logger.debug(f"Ignoring message from {user_id}: {message_text}")
         return
@@ -561,17 +635,22 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not search_query: await update.message.reply_text("⚠️ يرجى كتابة كلمة البحث بعد 'شيعة' أو 'شيعه'.\nمثال: <code>شيعة علي</code>", parse_mode='HTML'); return
     log_user(user_id); update_stats('search_count')
     safe_search_query = html.escape(search_query)
-    logger.info(f"User {user_id} searching (FTS w/ Redis, prefixes, deduplication) for: '{search_query}'")
-    matching_rowids = search_hadiths_db(search_query)
+    # --- MODIFIED: Use normalized search ---
+    logger.info(f"User {user_id} searching (Normalized FTS w/ Redis, prefixes, deduplication) for: '{search_query}'")
+    matching_rowids = search_hadiths_db(search_query) # search_hadiths_db now normalizes the query
+    # --- End Modification ---
     num_results = len(matching_rowids)
-    if num_results == 0: await update.message.reply_text(f"🤷‍♂️ لم يتم العثور على نتائج لكلمة البحث '<b>{safe_search_query}</b>'.", parse_mode='HTML'); return
+    if num_results == 0: await update.message.reply_text(f" لم يتم العثور على نتائج لكلمة البحث '<b>{safe_search_query}</b>'.", parse_mode='HTML'); return
 
     if num_results == 1:
-        # Unchanged from previous version
+        # Unchanged: Displays the hadith (which will be the normalized version from FTS)
         logger.info("Found single result, manually constructing first part.")
         row_id = matching_rowids[0]; hadith_details = get_hadith_details_by_db_id(row_id)
         if hadith_details:
-            book = html.escape(hadith_details['book'] if hadith_details['book'] else 'غير متوفر'); actual_text = html.escape(hadith_details['arabic_text'] if hadith_details['arabic_text'] else 'النص غير متوفر'); grading_text = html.escape(hadith_details['grading'] if hadith_details['grading'] else 'الصحة غير متوفرة')
+            book = html.escape(hadith_details['book'] if hadith_details['book'] else 'غير متوفر');
+            # Display the text fetched from DB (which is normalized)
+            actual_text = html.escape(hadith_details['arabic_text'])
+            grading_text = html.escape(hadith_details['grading'] if hadith_details['grading'] else 'لم يحدد') # Corrected variable name
             header = f"📖 <b>الكتاب:</b> {book}\n\n📜 <b>الحديث:</b>\n"; footer = f"\n\n\n⚖️ <b>الصحة:</b> {grading_text}"
             temp_part_prefix = "<b>الجزء الأول من 99</b>\n\n"; remaining_space_for_text = MAX_MESSAGE_LENGTH - len(header) - len(temp_part_prefix) - 20
             first_part_hadith_text = ""; remaining_hadith_text = actual_text
@@ -599,20 +678,26 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if 1 < num_results <= 10:
-        # Unchanged (numbered snippets)
+        # Unchanged (numbered snippets) - Displays normalized text from FTS
         logger.info(f"Found {num_results} unique results, displaying numbered snippets.")
         response_text = f"💡 تم العثور على <b>{num_results}</b> نتائج مطابقة للبحث عن '<b>{safe_search_query}</b>':\n\n"; buttons = []; snippet_num = 1
         for row_id in matching_rowids:
-            hadith_details = get_hadith_details_by_db_id(row_id)
+            hadith_details = get_hadith_details_by_db_id(row_id) # Gets normalized text
             if hadith_details:
-                book = html.escape(hadith_details['book'] if hadith_details['book'] else 'غير متوفر'); text_unescaped = hadith_details['arabic_text'] if hadith_details['arabic_text'] else ''
+                book = html.escape(hadith_details['book'] if hadith_details['book'] else 'غير متوفر');
+                # Use the normalized text for snippet generation as well
+                text_unescaped = hadith_details['arabic_text'] # Already normalized
                 context_snippet = "..."; found_keyword = None; keyword_index = -1; search_query_len = 0
-                temp_index = text_unescaped.lower().find(search_query.lower())
-                if temp_index != -1: keyword_index = temp_index; search_query_len = len(search_query); found_keyword = text_unescaped[keyword_index : keyword_index + search_query_len]
+                # Use normalized query for finding keyword in normalized text
+                normalized_search_query_term = normalize_arabic(search_query)
+                temp_index = text_unescaped.find(normalized_search_query_term) # Simple find on normalized text
+                if temp_index != -1:
+                    keyword_index = temp_index; search_query_len = len(normalized_search_query_term); found_keyword = text_unescaped[keyword_index : keyword_index + search_query_len]
+                # Prefix check might be less relevant now, but keep for structure
                 if keyword_index == -1:
-                     prefixes = ['و', 'ف', 'ب', 'ل', 'ك']
+                     prefixes = ['و', 'ف', 'ب', 'ل', 'ك'] # Prefixes don't need normalization
                      for p in prefixes:
-                         prefixed_query = p + search_query; temp_index = text_unescaped.lower().find(prefixed_query.lower())
+                         prefixed_query = p + normalized_search_query_term; temp_index = text_unescaped.find(prefixed_query)
                          if temp_index != -1: keyword_index = temp_index; search_query_len = len(prefixed_query); found_keyword = text_unescaped[keyword_index : keyword_index + search_query_len]; break
                 if keyword_index != -1 and found_keyword:
                     start_context_index = max(0, keyword_index - 100); end_context_index = min(len(text_unescaped), keyword_index + search_query_len + 100)
@@ -620,9 +705,10 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     words_before = text_before_raw.split(); words_after = text_after_raw.split()
                     context_before = " ".join(words_before[-SNIPPET_CONTEXT_WORDS:]); context_after = " ".join(words_after[:SNIPPET_CONTEXT_WORDS])
                     ellipsis_before = "... " if len(words_before) > SNIPPET_CONTEXT_WORDS or start_context_index > 0 else ""; ellipsis_after = " ..." if len(words_after) > SNIPPET_CONTEXT_WORDS or end_context_index < len(text_unescaped) else ""
+                    # Bold the found keyword (which is the normalized version)
                     context_snippet = f"{ellipsis_before}{context_before} <b>{html.escape(found_keyword)}</b> {context_after}{ellipsis_after}".strip()
                 elif text_unescaped: words = text_unescaped.split(); context_snippet = " ".join(words[:SNIPPET_CONTEXT_WORDS*2]) + ('...' if len(words) > SNIPPET_CONTEXT_WORDS*2 else '')
-                safe_context_snippet = context_snippet
+                safe_context_snippet = context_snippet # Contains HTML bold tag
                 response_text += f"{snippet_num}. 📖 <b>الكتاب:</b> {book}\n   📝 <b>الحديث:</b> {safe_context_snippet}\n\n---\n\n"
                 truncated_book = book[:25] + ('...' if len(book) > 25 else ''); simple_snippet_words = text_unescaped.split(); simple_snippet = " ".join(simple_snippet_words[:5]) + ('...' if len(simple_snippet_words) > 5 else '')
                 button_text = f"{snippet_num}. 📜 {truncated_book} - {html.escape(simple_snippet)}"; callback_data = f"view_{row_id}"; buttons.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
@@ -641,6 +727,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles button clicks (callbacks) for viewing full hadith or getting more parts."""
+    # Unchanged (Corrected Syntax Errors previously)
     query = update.callback_query; await query.answer(); data = query.data; logger.info(f"Callback received: {data}")
     try:
         action, value = data.split('_', 1)
@@ -649,7 +736,10 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
             if hadith_details:
                 try: await query.delete_message(); logger.info(f"Deleted original button list message {query.message.message_id}")
                 except telegram.error.BadRequest as e: logger.warning(f"Could not delete original button list message {query.message.message_id}: {e}")
-                book = html.escape(hadith_details['book'] if hadith_details['book'] else 'غير متوفر'); actual_text = html.escape(hadith_details['arabic_text'] if hadith_details['arabic_text'] else 'النص غير متوفر'); grading_text = html.escape(hadith_details['grading'] if hadith_details['grading'] else 'الصحة غير متوفرة')
+                book = html.escape(hadith_details['book'] if hadith_details['book'] else 'غير متوفر');
+                # Display normalized text from FTS table
+                actual_text = html.escape(hadith_details['arabic_text'])
+                grading_text = html.escape(hadith_details['grading'] if hadith_details['grading'] else 'لم يحدد') # Corrected variable name
                 header = f"📖 <b>الكتاب:</b> {book}\n\n📜 <b>الحديث:</b>\n"; footer = f"\n\n\n⚖️ <b>الصحة:</b> {grading_text}"
                 temp_part_prefix = "<b>الجزء الأول من 99</b>\n\n"; remaining_space_for_text = MAX_MESSAGE_LENGTH - len(header) - len(temp_part_prefix) - 20
                 first_part_hadith_text = ""; remaining_hadith_text = actual_text
@@ -669,10 +759,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.info(f"Sent part 1 (view action, manually constructed) for rowid {row_id}, message_id {message_sent.message_id}")
                 if total_parts_count > 1:
                     context.user_data[f'remaining_parts_{message_sent.message_id}'] = remaining_parts; context.user_data[f'total_parts_{message_sent.message_id}'] = total_parts_count
-                    # --- FIXED: Use _2 for the first 'More' button callback ---
-                    callback_data_more = f"more_{message_sent.message_id}_2";
-                    # --- END FIX ---
-                    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد ", callback_data=callback_data_more)]])
+                    callback_data_more = f"more_{message_sent.message_id}_2"; keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد ", callback_data=callback_data_more)]]) # Fixed: Use _2
                     try: await context.bot.edit_message_reply_markup(chat_id=query.message.chat_id, message_id=message_sent.message_id, reply_markup=keyboard); logger.info(f"Edited message {message_sent.message_id} to add 'More' button.")
                     except telegram.error.BadRequest as e: logger.warning(f"Could not edit message {message_sent.message_id} to add 'More' button: {e}")
                     except telegram.error.TelegramError as e: logger.error(f"Telegram error editing message {message_sent.message_id} to add 'More' button: {e}")
@@ -680,27 +767,17 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif action == "more":
             value_parts = value.split('_');
             if len(value_parts) == 2:
-                original_message_id = int(value_parts[0]);
-                # This is the overall part number we need to display next
-                next_part_overall_num = int(value_parts[1])
-                # Calculate the index into remaining_parts list
+                original_message_id = int(value_parts[0]); next_part_overall_num = int(value_parts[1])
                 next_remaining_part_index = next_part_overall_num - 2
-                logger.debug(f"--- MORE ACTION --- Callback value parts: {value_parts}, Original Msg ID: {original_message_id}, Next Overall Part: {next_part_overall_num}, Calculated Index: {next_remaining_part_index}") # Added detailed log
-
-                remaining_parts = context.user_data.get(f'remaining_parts_{original_message_id}');
-                total_parts = context.user_data.get(f'total_parts_{original_message_id}')
+                logger.debug(f"--- MORE ACTION --- Callback value parts: {value_parts}, Original Msg ID: {original_message_id}, Next Overall Part: {next_part_overall_num}, Calculated Index: {next_remaining_part_index}")
+                remaining_parts = context.user_data.get(f'remaining_parts_{original_message_id}'); total_parts = context.user_data.get(f'total_parts_{original_message_id}')
                 logger.debug(f"  Retrieved total_parts: {total_parts}")
                 if remaining_parts is not None: logger.debug(f"  Retrieved remaining_parts (length {len(remaining_parts)})")
                 else: logger.warning(f"  Could not find remaining_parts in context for key: remaining_parts_{original_message_id}")
-
                 if remaining_parts is not None and total_parts is not None and 0 <= next_remaining_part_index < len(remaining_parts):
-                    current_part_text = remaining_parts[next_remaining_part_index];
-                    # The overall part number *being displayed now* is correct
-                    current_part_display_num = next_remaining_part_index + 2
-                    part_num_word = arabic_number_to_word(current_part_display_num)
+                    current_part_text = remaining_parts[next_remaining_part_index]; current_part_display_num = next_remaining_part_index + 2; part_num_word = arabic_number_to_word(current_part_display_num)
                     logger.debug(f"  Current Part Display Num: {current_part_display_num}")
                     logger.debug(f"  Current Part Text (first 50 chars): {current_part_text[:50]}...")
-
                     part_text_with_title = f"<b>الجزء {part_num_word} من {total_parts}</b>\n\n{current_part_text}"
                     new_message = await context.bot.send_message(chat_id=query.message.chat_id, text=part_text_with_title, parse_mode='HTML')
                     logger.info(f"Sent part {current_part_display_num} (more action) message_id {new_message.message_id}")
@@ -710,37 +787,45 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                         context.user_data.pop(f'remaining_parts_{original_message_id}', None); context.user_data.pop(f'total_parts_{original_message_id}', None)
                     except telegram.error.BadRequest as e: logger.warning(f"Couldn't remove 'More' button from message {original_message_id}: {e}")
                     except telegram.error.TelegramError as e: logger.error(f"Telegram error removing 'More' button from message {original_message_id}: {e}")
-
                     if current_part_display_num < total_parts:
                         context.user_data[f'remaining_parts_{new_message.message_id}'] = remaining_parts; context.user_data[f'total_parts_{new_message.message_id}'] = total_parts
-                        # Next overall part number is current_part_display_num + 1
                         next_overall_part_for_button = current_part_display_num + 1
                         callback_data_next = f"more_{new_message.message_id}_{next_overall_part_for_button}"
-                        logger.debug(f"  Generating next callback data: {callback_data_next}") # Log next callback
+                        logger.debug(f"  Generating next callback data: {callback_data_next}")
                         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("المزيد ", callback_data=callback_data_next)]])
                         try: await context.bot.edit_message_reply_markup(chat_id=query.message.chat_id, message_id=new_message.message_id, reply_markup=keyboard); logger.info(f"Added 'More' button to new message {new_message.message_id}")
                         except telegram.error.BadRequest as e: logger.warning(f"Could not add 'More' button to more result message {new_message.message_id}: {e}")
                         except telegram.error.TelegramError as e: logger.error(f"Telegram error adding 'More' button to new message {new_message.message_id}: {e}")
                 else:
                     logger.warning(f"Could not find remaining parts in context or index out of bounds for 'more' callback: {data}")
-                    try: await context.bot.edit_message_reply_markup(chat_id=query.message.chat_id, message_id=original_message_id, reply_markup=None)
-                    except Exception: pass
+                    try:
+                        await context.bot.edit_message_reply_markup(chat_id=query.message.chat_id, message_id=original_message_id, reply_markup=None)
+                    except Exception:
+                        pass
             else:
                 logger.warning(f"Received 'more' callback with unexpected data format: {data}")
-                try: await query.edit_message_reply_markup(reply_markup=None)
-                except Exception: pass
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
     except ValueError as e:
         logger.error(f"Error parsing callback data '{data}': {e}")
-        try: await query.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
-        except Exception as send_err: logger.error(f"Failed to send error message to user after ValueError: {send_err}")
+        try:
+            await query.message.reply_text("⚠️ حدث خطأ أثناء معالجة طلبك.")
+        except Exception as send_err:
+            logger.error(f"Failed to send error message to user after ValueError: {send_err}")
     except telegram.error.TelegramError as e:
         logger.error(f"Telegram API error in handle_button_click for data {data}: {e}")
-        try: await query.message.reply_text(f"⚠️ حدث خطأ في تليجرام: {e.message}")
-        except Exception as send_err: logger.error(f"Failed to send Telegram error message to user: {send_err}")
+        try:
+            await query.message.reply_text(f"⚠️ حدث خطأ في تليجرام: {e.message}")
+        except Exception as send_err:
+            logger.error(f"Failed to send Telegram error message to user: {send_err}")
     except Exception as e:
         logger.exception(f"An unexpected error occurred in handle_button_click for data {data}: {e}")
-        try: await query.message.reply_text("⚠️ عذراً، حدث خطأ غير متوقع.")
-        except Exception as send_err: logger.error(f"Failed to send generic error message to user: {send_err}")
+        try:
+            await query.message.reply_text("⚠️ عذراً، حدث خطأ غير متوقع.")
+        except Exception as send_err:
+            logger.error(f"Failed to send generic error message to user: {send_err}")
 
 
 # --- Main Function ---
@@ -756,27 +841,58 @@ def main():
     if not BOT_OWNER_ID or BOT_OWNER_ID == 123456789: # Check placeholder owner ID
          logger.warning("BOT_OWNER_ID is not set correctly. The 'Add Hadith' approval feature will not work.")
 
-    try: init_db(); populate_db_from_json(JSON_FILE) # Use JSON_FILE constant
+    try:
+        init_db()
+        # --- IMPORTANT: Check if DB needs repopulation ---
+        logger.info("Checking if database needs repopulation for normalization...")
+        conn_check = get_db_connection()
+        cursor_check = conn_check.cursor()
+        needs_repopulation = False # Default to false, assume populated correctly unless check proves otherwise
+        try:
+            # Check for a word that would change after normalization
+            # We search for the *original* form. If found, DB is likely not normalized.
+            cursor_check.execute("SELECT 1 FROM hadiths_fts WHERE arabic_text MATCH '\"أخذ\"' LIMIT 1") # Check for original Alef with Hamza
+            if cursor_check.fetchone():
+                needs_repopulation = True
+                logger.warning("Detected non-normalized Alef (أ) in FTS table.")
+            else:
+                 # Check for other non-normalized forms if needed
+                 cursor_check.execute("SELECT 1 FROM hadiths_fts WHERE arabic_text LIKE '%ة%' LIMIT 1") # Check for Taa Marbuta
+                 if cursor_check.fetchone():
+                      needs_repopulation = True
+                      logger.warning("Detected Taa Marbuta (ة) in FTS table.")
+                 # Add more checks if necessary (e.g., for ى, ذ)
+
+        except sqlite3.Error as check_err:
+             logger.warning(f"Could not perform normalization check on DB (might be empty or other issue): {check_err}")
+             # If DB is empty, populate_db_from_json will handle it. If error, proceed cautiously.
+             pass # Continue execution even if check fails
+
+        conn_check.close()
+
+        if needs_repopulation:
+             logger.warning("----------------------------------------------------------------")
+             logger.warning("IMPORTANT: Database likely contains non-normalized text.")
+             logger.warning("Normalization features may not work correctly.")
+             logger.warning("Please DELETE the file 'hadith_bot.db' and restart the script")
+             logger.warning("to repopulate the database with normalized text.")
+             logger.warning("----------------------------------------------------------------")
+             # Consider exiting if strict normalization is required:
+             # return
+        # --- End check ---
+
+        populate_db_from_json(JSON_FILE) # Populate (will skip if already populated and check passed)
     except Exception as e: logger.error(f"Failed to initialize or populate database. Exiting. Error: {e}"); return
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # --- MODIFIED: Add ConversationHandler entry points and start button handler ---
+    # Add ConversationHandler for adding hadiths
     add_hadith_conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler('addhadith', add_hadith_start),
-            MessageHandler(filters.Regex(r'^اضافة حديث$') & ~filters.COMMAND, add_hadith_start),
-            CallbackQueryHandler(add_hadith_start_button, pattern=r'^start_add_hadith$')
-            ],
-        states={
-            ASK_BOOK: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_book)],
-            ASK_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)],
-            ASK_GRADING: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_grading), CommandHandler('skip', skip_grading)],
-        },
+        entry_points=[CommandHandler('addhadith', add_hadith_start), MessageHandler(filters.Regex(r'^اضافة حديث$') & ~filters.COMMAND, add_hadith_start), CallbackQueryHandler(add_hadith_start_button, pattern=r'^start_add_hadith$')],
+        states={ASK_BOOK: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_book)], ASK_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text)], ASK_GRADING: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_grading), CommandHandler('skip', skip_grading)],},
         fallbacks=[CommandHandler('cancel', cancel_submission)],
     )
     application.add_handler(add_hadith_conv_handler)
-    # --- End Modification ---
 
     # Register other handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -785,12 +901,8 @@ def main():
     application.add_handler(MessageHandler(filters.Regex(search_pattern) & ~filters.COMMAND, handle_search))
     trigger_only_pattern = r'^(شيعة|شيعه)$'
     application.add_handler(MessageHandler(filters.Regex(trigger_only_pattern) & ~filters.COMMAND, handle_search))
-
-    # Register approval callback handler
     application.add_handler(CallbackQueryHandler(handle_approval_callback, pattern=r'^(approve|reject)_\d+$'))
-    # Register view/more callback handler
     application.add_handler(CallbackQueryHandler(handle_button_click, pattern=r'^(view|more)_'))
-
 
     logger.info("Bot starting with FTS5, Redis cache, deduplication, and improved formatting...")
     application.run_polling()
