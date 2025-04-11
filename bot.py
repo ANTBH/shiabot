@@ -12,7 +12,7 @@ from typing import List, Dict, Tuple, Optional, Any, Set
 import asyncio # Import asyncio for potential sleep
 
 # --- Configuration ---
-BOT_TOKEN = "7378891608:AAFUPueUuSAPHd4BPN8znb-jcDGsjnnm_f8"  # استبدل هذا بالتوكن الخاص ببوتك
+BOT_TOKEN = "744871920:AAH5jFHRNm2ZR-GZch-6SnxGFxIFuZsAldM"  # استبدل هذا بالتوكن الخاص ببوتك
 JSON_FILE = '1.json'     # اسم ملف الأحاديث JSON (للقراءة الأولية فقط)
 DB_NAME = 'hadith_bot.db'      # اسم ملف قاعدة البيانات SQLite
 DEVELOPER_NAME = "عبد المجيد" # اسم المطور (لم يعد يستخدم في النص ولكن يمكن الاحتفاظ به)
