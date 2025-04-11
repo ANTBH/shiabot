@@ -347,7 +347,7 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return ASK_TEXT
     context.user_data['new_hadith_text'] = hadith_text
     logger.info(f"Received hadith text (length {len(hadith_text)}).")
-    await update.message.reply_text("ممتاز. أخيراً، الرجاء إرسال <b>درجة صحة الحديث</b> (إن وجدت، أو اضغط /skip للتخطي).", parse_mode='HTML')
+    await update.message.reply_text("ممتاز. أخيراً، الرجاء إرسال <b> صحة الحديث</b> (إن وجدت، أو اضغط /skip للتخطي).", parse_mode='HTML')
     return ASK_GRADING
 
 async def receive_grading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -364,7 +364,7 @@ async def skip_grading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     # Unchanged
     context.user_data['new_hadith_grading'] = None
     logger.info("Grading step skipped.")
-    await update.message.reply_text("تم تخطي درجة الصحة.")
+    await update.message.reply_text("تم تخطي تصنيف الحديث .")
     await save_and_notify_owner(update, context)
     return ConversationHandler.END
 
