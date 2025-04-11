@@ -17,7 +17,7 @@ import uuid # For generating unique IDs for approved hadiths
 from datetime import datetime # For submission timestamp
 
 # --- Configuration ---
-BOT_TOKEN = "7378891608:AAFUPueUuSAPHd4BPN8znb-jcDGsjnnm_f8"  # Token المستخدم
+BOT_TOKEN = "7448719208:AAH5jFHRNm2ZR-GZch-6SnxGFxIFuZsAldM"  # Token المستخدم
 JSON_FILE = '1.json'     # اسم ملف الأحاديث JSON
 DB_NAME = 'hadith_bot.db'      # اسم ملف قاعدة البيانات SQLite
 DEVELOPER_NAME = "عبد المجيد" # اسم المطور
