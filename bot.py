@@ -24,13 +24,12 @@ SNIPPET_CONTEXT_WORDS = 5      # Number of words before/after keyword in snippet
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_DB = 0
-CACHE_EXPIRY_SECONDS = 5555555555555555    # مدة صلاحية الكاش (مثال: ساعة واحدة)
+CACHE_EXPIRY_SECONDS = 3600    # مدة صلاحية الكاش (مثال: ساعة واحدة)
 
 # --- Logging Setup ---
-# --- MODIFIED: Set level to DEBUG to see detailed logs ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG # Changed to DEBUG
+    level=logging.DEBUG # Keep DEBUG for now
 )
 logger = logging.getLogger(__name__)
 
@@ -235,6 +234,7 @@ def search_hadiths_db(query: str) -> List[int]:
     Searches for hadiths using FTS, handles prefixes, and deduplicates results
     based on original_id. Checks Redis cache first. Returns a list of unique FTS rowids.
     """
+    # Unchanged (Includes deduplication logging)
     if not query: return []
 
     normalized_query = query.strip().lower()
@@ -242,31 +242,28 @@ def search_hadiths_db(query: str) -> List[int]:
     redis_conn = get_redis_connection()
     cached_result = None
 
-    # 1. Check Redis Cache
     if redis_conn:
         try:
             cached_data = redis_conn.get(cache_key)
             if cached_data:
                 cached_result = json.loads(cached_data.decode('utf-8'))
-                # Check if cached result is indeed a list (basic validation)
                 if isinstance(cached_result, list):
                     logger.info(f"Cache HIT for unique query '{query}'. Found {len(cached_result)} results in Redis.")
                     return cached_result
                 else:
                     logger.warning(f"Invalid data type found in cache for key '{cache_key}'. Expected list, got {type(cached_result)}. Ignoring cache.")
-                    redis_conn.delete(cache_key) # Delete invalid cache entry
+                    redis_conn.delete(cache_key)
             else:
                 logger.info(f"Cache MISS for unique query '{query}'.")
         except json.JSONDecodeError:
             logger.error(f"Error decoding cached JSON for key '{cache_key}'. Ignoring cache.")
-            if redis_conn: redis_conn.delete(cache_key) # Delete invalid cache entry
+            if redis_conn: redis_conn.delete(cache_key)
         except redis.exceptions.RedisError as e:
             logger.error(f"Redis error when getting cache for key '{cache_key}': {e}")
         except Exception as e:
             logger.error(f"Unexpected error during Redis cache get: {e}")
 
     logger.info(f"Searching SQLite FTS for query '{query}' with prefix handling and deduplication.")
-    # 2. Search SQLite FTS
     conn = get_db_connection()
     cursor = conn.cursor()
     unique_rowids = []
@@ -280,7 +277,6 @@ def search_hadiths_db(query: str) -> List[int]:
         fts_match_query = " OR ".join(fts_query_parts)
 
         logger.debug(f"Constructed FTS MATCH query: {fts_match_query}")
-        # Select rowid and original_id to allow deduplication
         cursor.execute(
             "SELECT rowid, original_id FROM hadiths_fts WHERE hadiths_fts MATCH ? ORDER BY rank",
             (fts_match_query,)
@@ -288,33 +284,27 @@ def search_hadiths_db(query: str) -> List[int]:
         results = cursor.fetchall()
         logger.info(f"Raw FTS Search for '{query}' found {len(results)} potential matches.")
 
-        # --- MODIFIED: Added detailed logging for deduplication ---
         logger.debug(f"Starting deduplication for query '{query}'.")
         for row in results:
-            rowid = row['rowid'] # Get rowid
+            rowid = row['rowid']
             original_id = row['original_id']
-            # Log with type info for debugging potential ID issues
             logger.debug(f"  Processing rowid: {rowid}, original_id: '{original_id}' (type: {type(original_id)})")
             if original_id is None:
                 logger.warning(f"  Skipping rowid {rowid} due to None original_id.")
-                continue # Skip if original_id is None
+                continue
 
-            # Ensure original_id is treated as string for set comparison
             original_id_str = str(original_id)
 
-            if original_id_str not in seen_original_ids: # Check if ID already seen
+            if original_id_str not in seen_original_ids:
                 logger.debug(f"    -> Adding rowid {rowid} (new original_id: '{original_id_str}')")
-                seen_original_ids.add(original_id_str)  # Add new ID to set
-                unique_rowids.append(rowid) # Add corresponding rowid to results
+                seen_original_ids.add(original_id_str)
+                unique_rowids.append(rowid)
             else:
                 logger.debug(f"    -> Skipping rowid {rowid} (duplicate original_id: '{original_id_str}')")
         logger.debug(f"Finished deduplication. Seen IDs count: {len(seen_original_ids)}. Unique rowids: {len(unique_rowids)}")
-        # --- End modification ---
 
-        # 3. Cache the deduplicated result in Redis
         if unique_rowids and redis_conn:
             try:
-                # Ensure we cache the final list of unique rowids
                 serialized_results = json.dumps(unique_rowids)
                 redis_conn.set(cache_key, serialized_results, ex=CACHE_EXPIRY_SECONDS)
                 logger.info(f"Cached {len(unique_rowids)} unique results for query '{query}' in Redis.")
@@ -349,9 +339,10 @@ def get_hadith_details_by_db_id(row_id: int) -> Optional[sqlite3.Row]:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /start command with a detailed welcome message and buttons."""
+    # Unchanged
     user = update.effective_user
-    log_user(user.id) # Log user visit
-    update_stats('start_usage') # Update start command usage stat
+    log_user(user.id)
+    update_stats('start_usage')
 
     keyboard = [
         [InlineKeyboardButton(
@@ -359,8 +350,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             url=f"https://t.me/{context.bot.username}?startgroup=true"
         )],
         [InlineKeyboardButton(
-            "📢 قناة البوت ", # Button text including username
-            url="https://t.me/shia_b0t" # Channel URL
+            "📢 قناة البوت",
+            url="https://t.me/shia_b0t"
         )]
     ]
 
@@ -408,6 +399,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /help command, showing stats and adding a developer button."""
+    # Unchanged
     log_user(update.effective_user.id)
     total_hadiths = get_total_hadiths_count()
     search_count = get_stat('search_count')
@@ -415,7 +407,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_usage_count = get_stat('start_usage')
 
     help_text = f"""
-    <b>مساعدة وإحصائيات بوت الأحاديث</b> 🕌
+    <b>مساعدة وإحصائيات بوت الأحاديث</b> 
 
     📊 <b>الإحصائيات:</b>
     - عدد الأحاديث المطابقة في قاعدة البيانات: {total_hadiths}
@@ -424,7 +416,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     🔍 <b>كيفية البحث:</b>
     أرسل رسالة تبدأ بـ <code>شيعة</code> أو <code>شيعه</code> ثم مسافة ثم الكلمة أو الجملة التي تريد البحث عنها.
-    مثال: <code>شيعه  باهتوهم</code>
+    مثال: <code>شيعه باهتوهم   </code>
 
     """
 
@@ -468,11 +460,12 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     num_results = len(matching_rowids)
 
     if num_results == 0:
-        await update.message.reply_text(f"🤷‍♂️ لم يتم العثور على نتائج لكلمة البحث '<b>{safe_search_query}</b>'.", parse_mode='HTML')
+        await update.message.reply_text(f" لم يتم العثور على نتائج لكلمة البحث '<b>{safe_search_query}</b>'.", parse_mode='HTML')
         return
 
     # --- Handle single result - Manual first part construction ---
     if num_results == 1:
+        # Unchanged from previous version
         logger.info("Found single result, manually constructing first part.")
         row_id = matching_rowids[0]
         hadith_details = get_hadith_details_by_db_id(row_id)
@@ -547,28 +540,28 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ حدث خطأ أثناء جلب تفاصيل النتيجة الوحيدة.")
         return
 
-    # Handle 2-10 results (Snippet logic unchanged)
+    # --- MODIFIED: Handle 2-10 results - Add numbering ---
     if 1 < num_results <= 10:
-        logger.info(f"Found {num_results} unique results, displaying snippets.")
+        logger.info(f"Found {num_results} unique results, displaying numbered snippets.")
         response_text = f"💡 تم العثور على <b>{num_results}</b> نتائج مطابقة للبحث عن '<b>{safe_search_query}</b>':\n\n"
         buttons = []
-        for row_id in matching_rowids:
+        snippet_num = 1 # Initialize snippet counter
+        for row_id in matching_rowids: # Iterate through unique rowids
             hadith_details = get_hadith_details_by_db_id(row_id)
             if hadith_details:
                 book = html.escape(hadith_details['book'] if hadith_details['book'] else 'غير متوفر')
                 text_unescaped = hadith_details['arabic_text'] if hadith_details['arabic_text'] else ''
 
+                # Snippet Generation (Unchanged logic)
                 context_snippet = "..."
                 found_keyword = None
                 keyword_index = -1
                 search_query_len = 0
-
                 temp_index = text_unescaped.lower().find(search_query.lower())
                 if temp_index != -1:
                     keyword_index = temp_index
                     search_query_len = len(search_query)
                     found_keyword = text_unescaped[keyword_index : keyword_index + search_query_len]
-
                 if keyword_index == -1:
                      prefixes = ['و', 'ف', 'ب', 'ل', 'ك']
                      for p in prefixes:
@@ -579,7 +572,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              search_query_len = len(prefixed_query)
                              found_keyword = text_unescaped[keyword_index : keyword_index + search_query_len]
                              break
-
                 if keyword_index != -1 and found_keyword:
                     start_context_index = max(0, keyword_index - 100)
                     end_context_index = min(len(text_unescaped), keyword_index + search_query_len + 100)
@@ -595,21 +587,25 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif text_unescaped:
                     words = text_unescaped.split()
                     context_snippet = " ".join(words[:SNIPPET_CONTEXT_WORDS*2]) + ('...' if len(words) > SNIPPET_CONTEXT_WORDS*2 else '')
-
                 safe_context_snippet = context_snippet
-                response_text += f"📖 <b>الكتاب:</b> {book}\n📝 <b>الحديث:</b> {safe_context_snippet}\n\n---\n\n"
 
+                # --- Add numbering to snippet text ---
+                response_text += f"{snippet_num}. 📖 <b>الكتاب:</b> {book}\n   📝 <b>الحديث:</b> {safe_context_snippet}\n\n---\n\n" # Indented حدیث line
+
+                # --- Add numbering to button text ---
                 truncated_book = book[:25] + ('...' if len(book) > 25 else '')
                 simple_snippet_words = text_unescaped.split()
                 simple_snippet = " ".join(simple_snippet_words[:5]) + ('...' if len(simple_snippet_words) > 5 else '')
-                button_text = f"📜 {truncated_book} - {html.escape(simple_snippet)}"
+                button_text = f"{snippet_num}. 📜 {truncated_book} - {html.escape(simple_snippet)}" # Added number
                 callback_data = f"view_{row_id}"
                 buttons.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+
+                snippet_num += 1 # Increment counter
             else: logger.warning(f"Could not retrieve details for rowid {row_id} during snippet generation.")
 
         if buttons:
             if len(response_text) > MAX_MESSAGE_LENGTH:
-                 await update.message.reply_text(f"⚠️ تم العثور على {num_results} نتيجة مطابقة، لكن قائمة المقتطفات طويلة جدًا.")
+                 await update.message.reply_text(f"⚠️ تم العثور على {num_results} نتائج مطابقة، لكن قائمة المقتطفات طويلة جدًا.")
             else:
                  await update.message.reply_html(response_text)
 
@@ -628,6 +624,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles button clicks (callbacks) for viewing full hadith or getting more parts."""
+    # Unchanged from previous version
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -826,7 +823,6 @@ def main():
 
 
     # Register handlers
-    # --- MODIFIED: Use 'start_command' for the /start command ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     search_pattern = r'^(شيعة|شيعه)\s+(.+)$'
